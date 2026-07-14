@@ -22,8 +22,7 @@ public:
 
         bool isParity() const
         {
-            uint16_t valueT = static_cast<uint16_t>((_whole >> _shift) & 0xffffu);
-            valueT ^= (valueT >> 8);
+            uint8_t valueT = static_cast<uint16_t>((_whole >> _shift) & 0xffu);
             valueT ^= (valueT >> 4);
             valueT ^= (valueT >> 2);
             valueT ^= (valueT >> 1);
@@ -31,6 +30,7 @@ public:
         }
         bool ckbit(int bit_index) const
         {
+            bit_index = std::min(15, std::max(0, bit_index));
             return ((_whole >> _shift) & (0b01u << bit_index)) ==1;
         }
 
@@ -112,11 +112,9 @@ public:
         bit_index = std::min(31, std::max(0, bit_index));
         _value &= ~(0b01u << bit_index);
     }
-    bool isParity() const
+    bool isParityL8() const
     {
-        uint32_t valueT = _value;
-        valueT ^= (valueT >> 16);
-        valueT ^= (valueT >> 8);
+        uint8_t valueT = _value & 0xffu;
         valueT ^= (valueT >> 4);
         valueT ^= (valueT >> 2);
         valueT ^= (valueT >> 1);
@@ -144,15 +142,6 @@ public:
         bit_index = std::min(15, std::max(0, bit_index));
         low() &= ~(0b01u << bit_index);
     }
-    bool isParityL()
-    {
-        uint16_t valueT = low();
-        valueT ^= (valueT >> 8);
-        valueT ^= (valueT >> 4);
-        valueT ^= (valueT >> 2);
-        valueT ^= (valueT >> 1);
-        return (valueT & 0b01u) ==0;
-    }
 
     // High halfReg
     void chbitH(int bit_index)    
@@ -174,15 +163,6 @@ public:
     {
         bit_index = std::min(15, std::max(0, bit_index));
         high() &= ~(0b01u << bit_index);
-    }
-    bool isParityH()
-    {
-        uint16_t valueT = high();
-        valueT ^= (valueT >> 8);
-        valueT ^= (valueT >> 4);
-        valueT ^= (valueT >> 2);
-        valueT ^= (valueT >> 1);
-        return (valueT & 0b01u) ==0;
     }
 
 private:
@@ -315,7 +295,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(31)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4add(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4add(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void add(reg32* dst, uint32_t src)
@@ -327,7 +307,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src & 0x80000000), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
             
-            flagSet4add(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4add(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0); 
         }
         void add(reg32*dst, reg32::HalfRef src)
@@ -339,7 +319,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(15)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4add(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4add(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void add(reg32::HalfRef* dst, reg32::HalfRef src)
@@ -383,7 +363,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(31)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4sub(copyT1 < src, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4sub(copyT1 < src, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void sub(reg32* dst, uint32_t src)
@@ -394,7 +374,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src & 0x80000000), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4sub(copyT1 < src, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4sub(copyT1 < src, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void sub(reg32* dst, reg32::HalfRef src)
@@ -405,7 +385,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(15)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4sub(copyT1 < src, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4sub(copyT1 < src, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void sub(reg32::HalfRef* dst, reg32::HalfRef src)
@@ -445,7 +425,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(31)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4adc(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4adc(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void adc(reg32* dst, uint32_t src)
@@ -458,7 +438,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src & 0x80000000), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4adc(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4adc(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void adc(reg32* dst, reg32::HalfRef src)
@@ -471,7 +451,7 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(15)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4adc(sum > *dst, dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4adc(sum > *dst, dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         void adc(reg32::HalfRef* dst, reg32::HalfRef src)
@@ -514,7 +494,31 @@ private:
             bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(31)), cpyMSB(copyT1.ckbit(31));
             bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
 
-            flagSet4sbb(*dst < (src + CFval), dst->isParityL(), *dst ==0, dstMSB, OFcheck);
+            flagSet4sbb(*dst < (src + CFval), dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
+            copyT1.word(0);
+        }
+        void sbb(reg32* dst, uint32_t src)
+        {
+            copyT1.word(dst->word());
+            uint32_t CFval = (flag->ckbit(0)) ? 1 : 0;
+            *dst = *dst - src - CFval;
+
+            bool dstMSB(dst->ckbit(31)), srcMSB(src & 0x80000000), cpyMSB(copyT1.ckbit(31));
+            bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
+
+            flagSet4sbb(*dst < (src + CFval), dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
+            copyT1.word(0);
+        }
+        void sbb(reg32* dst, reg32::HalfRef src)
+        {
+            copyT1.word(dst->word());
+            uint32_t CFval = (flag->ckbit(0)) ? 1 : 0;
+            *dst = *dst - src - CFval;
+
+            bool dstMSB(dst->ckbit(31)), srcMSB(src.ckbit(15)), cpyMSB(copyT1.ckbit(31));
+            bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
+
+            flagSet4sbb(*dst < (src + CFval), dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
         

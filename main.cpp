@@ -10,6 +10,12 @@
 #include <vector>
 
 
+
+const int centers_maxize = 4;
+const int regs_maxize = 9;
+const int segs_maxize = 8;
+
+
 class reg32
 {
 public:
@@ -267,16 +273,70 @@ uint32_t Hasher::randNum_arrHR2[Hasher::max4timesArg -1][Hasher::length_sizeof_u
 class Center32x
 {
 private:
-    class calculator
+    class commandProcesser
     {
     private:
         reg32* flag;
+        uint32_t* timE;
         reg32 copyT1, copyT2, copyT3, copyT4;
         uint16_t copyF1, copyF2, copyF3, copyF4;
 
     public:
-        calculator(reg32* flagN) : flag(flagN) {}
+        commandProcesser(reg32* flagN, uint32_t* timEN) : flag(flagN), timE(timEN) {}
 
+        uint32_t nop(uint32_t timE) const
+        {
+            int temp = timE;
+            return temp;
+        }
+        void nop() const
+        {}
+        void mov(reg32* dst, reg32 src)
+        {
+            dst->word(src.word());
+        }
+        void mov(reg32* dst, reg32::HalfRef src)
+        {
+            copyF1 = src;
+            dst->word(copyF1);
+            copyF1 = 0;
+        }
+        void mov(reg32* dst, uint32_t src)
+        {
+            dst->word(src);
+        }
+        void mov(reg32::HalfRef* dst, reg32::HalfRef src)
+        {
+            copyF1 = src;
+            *dst = copyF1;
+            copyF1 = 0;
+        }
+        void mov(reg32::HalfRef* dst, reg32 src)
+        {
+            copyF1 = src.low();
+            *dst = copyF1;
+            copyF1 = 0;
+        }
+        void mov(reg32::HalfRef* dst, uint16_t src)
+        {
+            *dst = src;
+        }
+        void xchg(reg32* dst, reg32* src)
+        {
+            copyT1.word(src->word());
+            src->word(dst->word());
+            dst->word(copyT1.word());
+
+            copyT1.word(0);
+        }
+        void xchg(reg32::HalfRef* dst, reg32::HalfRef* src)
+        {
+            copyF1 = *src;
+            copyF2 = *dst;
+            *src = copyF2;
+            *dst = copyF1;
+            copyF1 = copyF2 = 0;
+        }
         void flagSet4add(bool sum_betterThan_dst, bool dstParity, bool dstEZ, bool dstMSB, bool OFcheck)
         {
             // CF(0), PF(2), ZF(6), SF(7), OF(11)
@@ -521,17 +581,102 @@ private:
             flagSet4sbb(*dst < (src + CFval), dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
             copyT1.word(0);
         }
+        void sbb(reg32::HalfRef* dst, reg32::HalfRef src)
+        {
+            copyF1 = *dst;
+            uint16_t CFval = (flag->ckbit(0)) ? 1 : 0;
+            *dst = *dst - src - CFval;
+
+            bool dstMSB(dst->ckbit(15)), srcMSB(src.ckbit(15)), cpyMSB(copyF1 & 0x8000);
+            bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
+
+            flagSet4sbb(*dst < (src + CFval), dst->isParity(), *dst ==0, dstMSB, OFcheck);
+            copyF1 = 0;
+        }
+        void sbb(reg32::HalfRef* dst, uint16_t src)
+        {
+            copyF1 = *dst;
+            uint16_t Cfval = (flag->ckbit(0)) ? 1 : 0;
+            *dst = *dst - src - Cfval;
+
+            bool dstMSB(dst->ckbit(15)), srcMSB(src & 0x8000), cpyMSB(copyF1 & 0x8000);
+            bool OFcheck = (cpyMSB && srcMSB && !dstMSB) || (!cpyMSB && !srcMSB && dstMSB);
+
+            flagSet4sbb(*dst < (src + Cfval), dst->isParity(), *dst ==0, dstMSB, OFcheck);
+            copyF1 = 0;
+        }
+        void flagSet4inc(bool Parity, bool EZ, bool MSB, bool OFcheck)
+        {
+            // PF(2), ZF(6), SF(7), OF(11)
+            if (Parity) {flag->stbit(2); } else{flag->clbit(2); }
+            if (EZ) {flag->stbit(6); } else{flag->clbit(6); }
+            if (MSB) {flag->stbit(7); } else{flag->clbit(7); }
+            if (OFcheck) {flag->stbit(11); } else{flag->clbit(11); }
+        }
+        void inc(reg32* dst)
+        {
+            copyT1.word(dst->word());
+            *dst = *dst + 1;
+
+            bool dstMSB(dst->ckbit(31)), cpyMSB(copyT1.ckbit(31));
+            bool OFcheck = (cpyMSB && !dstMSB) || (!cpyMSB && dstMSB);
+
+            flagSet4inc(dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
+            copyT1.word(0);
+        }
+        void inc(reg32::HalfRef* dst)
+        {
+            copyF1 = *dst;
+            *dst = *dst + 1;
+
+            bool dstMSB(dst->ckbit(15)), cpyMSB(copyF1 & 0x8000);
+            bool OFcheck = (cpyMSB && !dstMSB) || (!cpyMSB && dstMSB);
+
+            flagSet4inc(dst->isParity(), *dst ==0, dstMSB, OFcheck);
+            copyF1 = 0;
+        }
+        void flagSet4dec(bool Parity, bool EZ, bool MSB, bool OFcheck)
+        {
+            // PF(2), ZF(6), SF(7), OF(11)
+            if (Parity) {flag->stbit(2); } else{flag->clbit(2); }
+            if (EZ) {flag->stbit(6); } else{flag->clbit(6); }
+            if (MSB) {flag->stbit(7); } else{flag->clbit(7); }
+            if (OFcheck) {flag->stbit(11); } else{flag->clbit(11); }
+        }
+        void dec(reg32* dst)
+        {
+            copyT1.word(dst->word());
+            *dst = *dst - 1;
+
+            bool dstMSB(dst->ckbit(31)), cpyMSB(copyT1.ckbit(31));
+            bool OFcheck = (cpyMSB && !dstMSB) || (!cpyMSB && dstMSB);
+
+            flagSet4dec(dst->isParityL8(), *dst ==0, dstMSB, OFcheck);
+            copyT1.word(0);
+        }
+        void dec(reg32::HalfRef* dst)
+        {
+            copyF1 = *dst;
+            *dst = *dst - 1;
+
+            bool dstMSB(dst->ckbit(15)), cpyMSB(copyF1 & 0x8000);
+            bool OFcheck = (cpyMSB && !dstMSB) || (!cpyMSB && dstMSB);
+
+            flagSet4dec(dst->isParity(), *dst ==0, dstMSB, OFcheck);
+            copyF1 = 0;
+        }
         
     };
 
     uint32_t IDt;
     uint32_t EID;
     uint32_t UD;
+    uint32_t timE;
 
     reg32 FLAG = 0;
-    calculator calc{&FLAG};
+    commandProcesser calc{&FLAG, &timE};
 
-    uint32_t segs[8];
+    uint32_t segs[8] = {0};
     uint32_t& CS = segs[0];
     uint32_t& DS = segs[1];
     uint32_t& SS = segs[2];
@@ -542,6 +687,8 @@ private:
     reg32 AX, CX, DX, BX;
     reg32 SP, BP, SI, DI;
 
+    reg32* regs[regs_maxize] = {&AX, &CX, &DX, &BX, &SP, &BP, &SI, &DI, &FLAG};
+
 public:
     Center32x(uint32_t ID)
     {
@@ -551,10 +698,54 @@ public:
         EID = Hasher::get_randNumHR2(UD, temp);
     }
 
+    void getSegs(uint32_t* dstArray) const
+    {
+        for (int index =0; index < 8; ++index)
+        {
+            dstArray[index] = segs[index];
+        }
+    }
+    void getRegs(reg32* dstArray) const
+    {
+        for (int index =0; index < regs_maxize; ++index)
+        {
+            dstArray[index].word(regs[index]->word());
+        }
+    }
+
 };
 
 class rootOP
 {};
+
+class debugCMD
+{
+private:
+    Center32x* centers[centers_maxize];
+    reg32 regs_0f_centers[centers_maxize][regs_maxize];
+    uint32_t segs_0f_centers[centers_maxize][segs_maxize];
+
+public:
+    debugCMD(Center32x* centersG[centers_maxize])
+    {
+        for (int index =0; index < centers_maxize; ++index)
+        {
+            centers[index] = centersG[index];
+            centers[index]->getRegs(regs_0f_centers[index]);
+            centers[index]->getSegs(segs_0f_centers[index]);
+        }
+    }
+    void data_update()
+    {
+        for (int index =0; index < centers_maxize; ++index)
+        {
+            centers[index]->getRegs(regs_0f_centers[index]);
+            centers[index]->getSegs(segs_0f_centers[index]);
+        }
+    }
+
+};
+
 
 
 
@@ -570,7 +761,6 @@ int main()
 {
     initG();
     Hasher ashor;
-    std::cout << ashor.get_randNumHR2(0x456) << std::endl;
     system("pause");
     return 0;
 }

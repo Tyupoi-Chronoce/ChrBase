@@ -8,12 +8,66 @@
 #include <io.h>
 #include <algorithm>
 #include <vector>
+#include <map>
 
 
 
 const int centers_maxize = 4;
 const int regs_maxize = 9;
 const int segs_maxize = 8;
+const uint32_t ram_maxize = 0x7fffff;       // uint8 -> 1 Byte * 0xffffff => ~ 8 MiB
+const uint32_t stack_maxize = 0x7fff;       // uint8 -> 1 Byte * 0x7fff => ~ 32 KiB
+
+const uint8_t dead_magicNum = 0xcc;
+
+
+class Ram
+{
+private:
+    mutable uint32_t read_times = 0;
+    mutable uint32_t write_times = 0;
+
+public:
+    uint8_t ramD[ram_maxize] = {0};
+    Ram() {}
+
+    operator uint8_t() const {return *ramD; }
+
+    uint8_t read(uint32_t index)
+    {
+        if (index >= ram_maxize) {return dead_magicNum; }
+        read_times++;
+        return ramD[index];
+    }
+    void write(uint32_t index, uint8_t val)
+    {
+        if (index >= ram_maxize) {return; }
+        write_times++;
+        ramD[index] = val;
+    }
+
+    uint32_t get_readTimes() const {return read_times; }
+    uint32_t get_writeTimes() const {return write_times; }
+
+
+    uint8_t operator[](uint32_t index) const
+    {
+        if (index >= ram_maxize) {return dead_magicNum; }
+        read_times++;
+        return ramD[index];
+    }
+    uint8_t& operator[](uint32_t index)
+    {
+        if (index >= ram_maxize) 
+        {
+            static uint8_t temp_area = dead_magicNum;
+            return temp_area; 
+        }
+        write_times++;
+        return ramD[index];
+    }
+
+};
 
 
 class reg32
@@ -686,8 +740,9 @@ private:
 
     reg32 AX, CX, DX, BX;
     reg32 SP, BP, SI, DI;
-
     reg32* regs[regs_maxize] = {&AX, &CX, &DX, &BX, &SP, &BP, &SI, &DI, &FLAG};
+    
+    std::map<uint16_t, devIO*> devsRegistry;
 
 public:
     Center32x(uint32_t ID)
@@ -714,6 +769,9 @@ public:
     }
 
 };
+
+class devIO
+{};
 
 class rootOP
 {};

@@ -26,31 +26,44 @@ class Ram
 private:
     mutable uint32_t read_times = 0;
     mutable uint32_t write_times = 0;
+    bool deadState_temp = false;
 
 public:
     uint8_t ramD[ram_maxize] = {0};
+
     Ram() {}
 
     operator uint8_t() const {return *ramD; }
 
     uint8_t read(uint32_t index)
     {
-        if (index >= ram_maxize) {return dead_magicNum; }
+        if (index >= ram_maxize) 
+        {
+            deadState_temp = true; 
+            return dead_magicNum; 
+        }
+        deadState_temp = false;
         read_times++;
         return ramD[index];
     }
     void write(uint32_t index, uint8_t val)
     {
-        if (index >= ram_maxize) {return; }
+        if (index >= ram_maxize) 
+        {
+            deadState_temp = true;
+            return; 
+        }
+        deadState_temp = false;
         write_times++;
         ramD[index] = val;
     }
+    bool get_deadState() const {return deadState_temp; }
 
     uint32_t get_readTimes() const {return read_times; }
     uint32_t get_writeTimes() const {return write_times; }
 
 
-    uint8_t operator[](uint32_t index) const
+    /*uint8_t operator[](uint32_t index) const
     {
         if (index >= ram_maxize) {return dead_magicNum; }
         read_times++;
@@ -65,7 +78,7 @@ public:
         }
         write_times++;
         return ramD[index];
-    }
+    } //*/
 
 };
 
@@ -324,6 +337,16 @@ uint32_t Hasher::randNum_arrToT[Hasher::max4timesArg -1][Hasher::length_sizeof_u
 uint32_t Hasher::randNum_arrHR2[Hasher::max4timesArg -1][Hasher::length_sizeof_uint16] = {0};
 
 
+class devIO
+{
+private:
+    uint32_t UEID;
+
+public:
+    devIO(uint32_t ID) : UEID(ID) {}
+
+};
+
 class Center32x
 {
 private:
@@ -331,12 +354,19 @@ private:
     {
     private:
         reg32* flag;
+        reg32* ACC;     // AX
+        reg32* DRC;     // DX
         uint32_t* timE;
+        uint8_t* ramP;
+
+
+        // for temporary use
         reg32 copyT1, copyT2, copyT3, copyT4;
         uint16_t copyF1, copyF2, copyF3, copyF4;
 
     public:
-        commandProcesser(reg32* flagN, uint32_t* timEN) : flag(flagN), timE(timEN) {}
+        commandProcesser(reg32* flagN, reg32* AX, reg32* DX, uint32_t* timEN, uint8_t* ramT)
+         : flag(flagN), ACC(AX), DRC(DX), timE(timEN), ramP(ramT) {}
 
         uint32_t nop(uint32_t timE) const
         {
@@ -390,6 +420,16 @@ private:
             *src = copyF2;
             *dst = copyF1;
             copyF1 = copyF2 = 0;
+        }
+        void cbw()
+        {
+            bool SignAL = ACC->ckbit(15);       // check the sign of AL
+            if (SignAL) {ACC->high() = 0xffff; } else {ACC->high() = 0; }
+        }
+        void cwd()
+        {
+            bool SignAX = ACC->ckbit(31);       // check the sign of AX
+            if (SignAX) {DRC->word(0xffffffff); } else {DRC->word(0); }
         }
         void flagSet4add(bool sum_betterThan_dst, bool dstParity, bool dstEZ, bool dstMSB, bool OFcheck)
         {
@@ -719,6 +759,206 @@ private:
             flagSet4dec(dst->isParity(), *dst ==0, dstMSB, OFcheck);
             copyF1 = 0;
         }
+        void flagSet4mul(bool CFcheck, bool OFcheck)
+        {
+            // CF(0), OF(11)
+            if (CFcheck) {flag->stbit(0); } else {flag->clbit(0); }
+            if (OFcheck) {flag->stbit(11); } else {flag->clbit(11); }
+        }
+        void mul(reg32 src)
+        {
+            uint64_t temp = ((uint64_t)ACC->word() * (uint64_t)src.word());
+            ACC->word((uint32_t)temp);
+            DRC->word((uint32_t)(temp >> 32));
+
+            bool CFcheck, OFcheck;
+            if (DRC->word() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4mul(CFcheck, OFcheck);
+        }
+        void mul(uint32_t ops32)
+        {
+            uint64_t temp =  ((uint64_t)ACC->word() * (uint64_t)ops32);
+            ACC->word((uint32_t)temp);
+            DRC->word((uint32_t)(temp >> 32));
+
+            bool CFcheck, OFcheck;
+            if (DRC->word() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4mul(CFcheck, OFcheck);
+        }
+        void mul(reg32::HalfRef src)
+        {
+            ACC->word((uint32_t)(ACC->low() * src));
+
+            bool CFcheck, OFcheck;
+            if (ACC->high() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4mul(CFcheck, OFcheck);
+        }
+        void mul(uint16_t ops16)
+        {
+            ACC->word((uint32_t)(ACC->low() * ops16));
+
+            bool CFcheck, OFcheck;
+            if (ACC->high() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4mul(CFcheck, OFcheck);
+        }
+        void flagSet4div()
+        {
+            // pass--
+        }
+        void div(reg32 src)
+        {
+            if (src.word() ==0) {return; }
+
+            uint64_t divD = ((uint64_t)DRC->word() << 32) + ACC->word();
+            ACC->word((uint32_t)(divD / src));
+            DRC->word((uint32_t)(divD % src));
+
+            flagSet4div();
+        }
+        void div(uint32_t ops32)
+        {
+            if (ops32 ==0) {return; }
+
+            uint64_t divD = ((uint64_t)DRC->word() << 32) + ACC->word();
+            ACC->word((uint32_t)(divD / ops32));
+            DRC->word((uint32_t)(divD % ops32));
+
+            flagSet4div();
+        }
+        void div(reg32::HalfRef src)
+        {
+            if (src ==0) {return; }
+
+            copyT1.word(ACC->word());
+            ACC->low() = copyT1.word() / src;
+            ACC->high() = copyT1.word() % src;
+
+            flagSet4div();
+            copyT1.word(0);
+        }
+        void div(uint16_t ops16)
+        {
+            if (ops16 ==0) {return; }
+
+            copyT1.word(ACC->word());
+            ACC->low() = copyT1.word() / ops16;
+            ACC->high() = copyT1.word() % ops16;
+
+            flagSet4div();
+            copyT1.word(0);
+        }
+        void flagSet4imul(bool CFcheck, bool OFcheck)
+        {
+            flagSet4mul(CFcheck, OFcheck);
+        }
+        void imul(reg32 src)
+        {
+            int32_t AX_signed = static_cast<int32_t>(ACC->word());
+            int32_t src_signed = static_cast<int32_t>(src.word());
+            int64_t temp = (int64_t)AX_signed * src_signed;
+            uint64_t tempBits = *(int64_t*)&temp;
+            ACC->word(static_cast<uint32_t>(tempBits));
+            DRC->word(static_cast<uint32_t>(tempBits >> 32));
+
+            bool CFcheck, OFcheck;
+            if (DRC->word() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4imul(CFcheck, OFcheck);
+        }
+        void imul(uint32_t ops32)
+        {
+            int32_t AX_signed = static_cast<int32_t>(ACC->word());
+            int32_t src_signed = static_cast<int32_t>(ops32);
+            int64_t temp = (int64_t)AX_signed * src_signed;
+            uint64_t tempBits = *(int64_t*)&temp;
+            ACC->word(static_cast<uint32_t>(tempBits));
+            DRC->word(static_cast<uint32_t>(tempBits >> 32));
+
+            bool CFcheck, OFcheck;
+            if (DRC->word() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4imul(CFcheck, OFcheck);
+        }
+        void imul(reg32::HalfRef src)
+        {
+            int16_t AL_signed = static_cast<int16_t>(ACC->low());
+            int16_t src_signed = static_cast<int16_t>(src);
+            int32_t temp = (int32_t)AL_signed * src_signed;
+            ACC->word(*(int32_t*)&temp);
+
+            bool CFcheck, OFcheck;
+            if (ACC->high() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4imul(CFcheck, OFcheck);
+        }
+        void imul(uint16_t ops16)
+        {
+            int16_t AL_signed = static_cast<int16_t>(ACC->low());
+            int16_t src_signed = static_cast<int16_t>(ops16);
+            int32_t temp = (int32_t)AL_signed * src_signed;
+            ACC->word(*(int32_t*)&temp);
+
+            bool CFcheck, OFcheck;
+            if (ACC->high() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
+
+            flagSet4imul(CFcheck, OFcheck);
+        }
+        void flagSet4idiv()
+        {
+            // pass--
+        }
+        void idiv(reg32 src)
+        {
+            if (src.word() ==0) {return; }
+
+            int64_t divD = static_cast<int64_t>((uint64_t)(DRC->word() << 32) + ACC->word());
+            int32_t divS = static_cast<int32_t>(src.word());
+
+            ACC->word((uint32_t)(int32_t)(divD / divS));
+            DRC->word((uint32_t)(int32_t)(divD % divS));
+
+            flagSet4idiv();
+        }
+        void idiv(uint32_t ops32)
+        {
+            if (ops32 ==0) {return; }
+
+            int64_t divD = static_cast<int64_t>((uint64_t)(DRC->word() << 32) + ACC->word());
+            int32_t divS = static_cast<int32_t>(ops32);
+
+            ACC->word((uint32_t)(int32_t)(divD / divS));
+            DRC->word((uint32_t)(int32_t)(divD % divS));
+
+            flagSet4idiv();
+        }
+        void idiv(reg32::HalfRef src)
+        {
+            if (src ==0) {return; }
+
+            int32_t divD = static_cast<int32_t>(ACC->word());
+            int16_t divS = static_cast<int16_t>(src);
+
+            ACC->low() = (uint16_t)(int16_t)(divD / divS);
+            ACC->high() = (uint16_t)(int16_t)(divD % divS);
+
+            flagSet4idiv();
+        }
+        void idiv(uint16_t ops16)
+        {
+            if (ops16 ==0) {return; }
+
+            int32_t divD = static_cast<int32_t>(ACC->word());
+            int16_t divS = static_cast<int16_t>(ops16);
+
+            ACC->low() = (uint16_t)(int16_t)(divD / divS);
+            ACC->high() = (uint16_t)(int16_t)(divD % divS);
+
+            flagSet4idiv();
+        }
         
     };
 
@@ -726,9 +966,22 @@ private:
     uint32_t EID;
     uint32_t UD;
     uint32_t timE;
+    uint8_t* ramP;
 
     reg32 FLAG = 0;
-    commandProcesser calc{&FLAG, &timE};
+    /*  flags   index   bits    description
+        CF      0       1       Carry Flag;
+        DBZ     1       1       Divide By Zero; <<
+        PF      2       1       Parity Flag;
+        ZF      6       1       Zero Flag;
+        SF      7       1       Sign Flag;
+        IF      9       1       Interrupt Flag;
+        DF      10      1       Direction Flag;
+        OF      11      1       Overflow Flag;
+        IOPL    12-13   2       I/O Privilege Level;
+        NT      14      1       Nested Task;
+        RF      16      1       Resume Flag;
+    */
 
     uint32_t segs[8] = {0};
     uint32_t& CS = segs[0];
@@ -742,15 +995,18 @@ private:
     reg32 SP, BP, SI, DI;
     reg32* regs[regs_maxize] = {&AX, &CX, &DX, &BX, &SP, &BP, &SI, &DI, &FLAG};
     
+    commandProcesser calc{&FLAG, &AX, &DX, &timE, ramP};
+    
     std::map<uint16_t, devIO*> devsRegistry;
 
 public:
-    Center32x(uint32_t ID)
+    Center32x(uint32_t ID, uint8_t* ramG)
     {
         IDt = ID;
         UD = Hasher::hash_uint32(IDt);
         uint8_t temp = UD & 0b0111;
         EID = Hasher::get_randNumHR2(UD, temp);
+        ramP = ramG;
     }
 
     void getSegs(uint32_t* dstArray) const
@@ -769,9 +1025,6 @@ public:
     }
 
 };
-
-class devIO
-{};
 
 class rootOP
 {};

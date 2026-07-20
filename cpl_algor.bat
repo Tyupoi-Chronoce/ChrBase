@@ -1,1 +1,0 @@
-g++ -shared -o "_algor.dll" ".\cpp_dlls\__4algor.cpp" -O2 -m64 -static-libgcc -static-libstdc++ -D__4ALGOR_EXPORTS -I. -std=c++17

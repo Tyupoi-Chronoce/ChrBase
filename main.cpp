@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <thread>
 
 
 
@@ -31,11 +32,13 @@ const int centers_maxize = 4;
 const int regs_maxize = 9;
 const int segs_maxize = 8;
 const int commandsArr_maxize = 10;
-const uint32_t ram_maxize = 0x7fffff;       // uint8 -> 1 Byte * 0xffffff => ~ 8 MiB
+const uint32_t ram_maxize = 0x7fffff;       // uint8 -> 1 Byte * 0x7fffff => ~ 8 MiB
 const uint32_t stack_maxize = 0x7fff;       // uint8 -> 1 Byte * 0x7fff => ~ 32 KiB
 const uint32_t ramSegs_maxize = 256;
+const uint16_t opc_maxize = 0xff;
 
 const uint8_t dead_magicNum = 0xcc;
+uint8_t* opCode_decodeTable = new uint8_t[opc_maxize +1];
 
 
 class Ram
@@ -51,6 +54,7 @@ private:
     mutable uint32_t write_times = 0;
     mutable bool deadState_temp = false;
     mutable bool UAstate_0f_PID[PID_maxize +1] = {false};
+    mutable uint8_t ramD[ram_maxize] = {0};
     
     // 0x00 is root PID, same means it s locked for other Processes tha cant visit;
     // 0x01 is const PID, same means every Process can visit tha ram segmentation locked by it but read only except root PID;
@@ -58,14 +62,13 @@ private:
     mutable uint8_t ramSgmtation_LocktPID[ramSegs_maxcount] = {0x00};
 
 public:
-    uint8_t ramD[ram_maxize] = {0};
-
 
     Ram() {}
 
     bool PIDcanRead(uint32_t index, uint16_t PID) const
     {
-        uint8_t ramPID = ramSgmtation_LocktPID[index / ramSegs_size];
+        uint32_t index_ramSeg = index / ramSegs_size;
+        uint8_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
         if (ramPID == rootPID) {return false; }
         if (ramPID == constPID) {return true; }
         if (ramPID == publicPID) {return true; }
@@ -73,7 +76,8 @@ public:
     }
     bool PIDcanWrite(uint32_t index, uint16_t PID) const
     {
-        uint8_t ramPID = ramSgmtation_LocktPID[index / ramSegs_size];
+        uint32_t index_ramSeg = index / ramSegs_size;
+        uint8_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
         if (ramPID == rootPID) {return false; }
         if (ramPID == constPID) {return false; }
         if (ramPID == publicPID) {return true; }
@@ -121,7 +125,7 @@ public:
     uint16_t read16(uint32_t index, uint16_t PID=publicPID) const
     {
         bool canVisit = true; // root PID can pass
-        if (!(PID == rootPID)) {canVisit = PIDcanRead(index +1, PID); }
+        if (!(PID == rootPID)) {canVisit = PIDcanRead(index, PID) && PIDcanRead(index +1, PID); }
         if (!canVisit) 
         {
             UAstate_0f_PID[PID] = true;
@@ -139,7 +143,7 @@ public:
     uint32_t read32(uint32_t index, uint16_t PID=publicPID) const
     {
         bool canVisit = true; // root PID can pass
-        if (!(PID == rootPID)) {canVisit = PIDcanRead(index +3, PID); }
+        if (!(PID == rootPID)) {canVisit = PIDcanRead(index, PID) && PIDcanRead(index +3, PID); }
         if (!canVisit) 
         {
             UAstate_0f_PID[PID] = true;
@@ -157,7 +161,7 @@ public:
     void write16(uint32_t index, uint16_t val, uint16_t PID=publicPID)
     {
         bool canVisit = true; // root PID can pass
-        if (!(PID == rootPID)) {canVisit = PIDcanWrite(index +1, PID); }
+        if (!(PID == rootPID)) {canVisit = PIDcanWrite(index, PID) && PIDcanWrite(index +1, PID); }
         if (!canVisit) 
         {
             UAstate_0f_PID[PID] = true;
@@ -176,7 +180,7 @@ public:
     void write32(uint32_t index, uint32_t val, uint16_t PID=publicPID)
     {
         bool canVisit = true; // root PID can pass
-        if (!(PID == rootPID)) {canVisit = PIDcanWrite(index +3, PID); }
+        if (!(PID == rootPID)) {canVisit = PIDcanWrite(index, PID) && PIDcanWrite(index +3, PID); }
         if (!canVisit) 
         {
             UAstate_0f_PID[PID] = true;
@@ -230,6 +234,7 @@ public:
     {
     public:
         HalfRef(uint32_t& whole, int shift) : _whole(whole), _shift(shift) {}
+        HalfRef(reg32& reg, int shift) : _whole(reg._value), _shift(shift) {}
 
         operator uint16_t() const {return static_cast<uint16_t>((_whole >> _shift) & 0xffff); }
 
@@ -251,6 +256,13 @@ public:
         {
             uint32_t mask = 0xffffu << _shift;
             _whole = (_whole & ~mask) | ((uint32_t)val << _shift); 
+
+            return *this;
+        }
+        HalfRef& operator=(const HalfRef& otherHalfReg) 
+        {
+            uint32_t mask = 0xffffu << _shift;
+            _whole = (_whole & ~mask) | (otherHalfReg._whole & mask); 
 
             return *this;
         }
@@ -936,9 +948,9 @@ private:
 
             flagSet4mul(CFcheck, OFcheck);
         }
-        void mul(uint16_t dst6)
+        void mul(uint16_t ops16)
         {
-            ACC->word((uint32_t)(ACC->low() * dst6));
+            ACC->word((uint32_t)(ACC->low() * ops16));
 
             bool CFcheck, OFcheck;
             if (ACC->high() ==0) {CFcheck = OFcheck = false; } else {CFcheck = OFcheck = true; }
@@ -992,17 +1004,17 @@ private:
             flagSet4div();
             copyT1.word(0);
         }
-        void div(uint16_t dst6)
+        void div(uint16_t ops16)
         {
-            if (dst6 ==0)
+            if (ops16 ==0)
             {
                 flag->stbit(1);     // Divide by zero
                 return;
             }
 
             copyT1.word(ACC->word());
-            ACC->low() = copyT1.word() / dst6;
-            ACC->high() = copyT1.word() % dst6;
+            ACC->low() = copyT1.word() / ops16;
+            ACC->high() = copyT1.word() % ops16;
 
             flagSet4div();
             copyT1.word(0);
@@ -1051,10 +1063,10 @@ private:
 
             flagSet4imul(CFcheck, OFcheck);
         }
-        void imul(uint16_t dst6)
+        void imul(uint16_t ops16)
         {
             int16_t AL_signed = static_cast<int16_t>(ACC->low());
-            int16_t src_signed = static_cast<int16_t>(dst6);
+            int16_t src_signed = static_cast<int16_t>(ops16);
             int32_t temp = (int32_t)AL_signed * src_signed;
             ACC->word(*(int32_t*)&temp);
 
@@ -1115,16 +1127,16 @@ private:
 
             flagSet4idiv();
         }
-        void idiv(uint16_t dst6)
+        void idiv(uint16_t ops16)
         {
-            if (dst6 ==0)
+            if (ops16 ==0)
             {
                 flag->stbit(1);     // Divide by zero
                 return;
             }
 
             int32_t divD = static_cast<int32_t>(ACC->word());
-            int16_t divS = static_cast<int16_t>(dst6);
+            int16_t divS = static_cast<int16_t>(ops16);
 
             ACC->low() = (uint16_t)(int16_t)(divD / divS);
             ACC->high() = (uint16_t)(int16_t)(divD % divS);
@@ -1340,27 +1352,22 @@ private:
     class commandDecoder
     {
     private:
-        Center32x::commandProcesser* cmdPcsr;
+        commandProcesser* cmdPcsr;
         uint16_t* PID;
         reg32* regs;
         reg32* segs;
-        uint32_t timE;
+        uint32_t* timE;
         Ram* ramP;
 
-        reg32::HalfRef* halfRegs[regs_maxize];
+        reg32::HalfRef halfRegs[8];
 
     public:
-        commandDecoder(Center32x::commandProcesser* cmds, reg32* regsN, reg32* segsN, uint32_t timEN, Ram* ramG, uint16_t* PIDN)
-         : cmdPcsr(cmds), regs(regsN), segs(segsN), timE(timEN), ramP(ramG), PID(PIDN) 
-        {
-            int halfRegsLength = regs_maxize / 2;
-            for (int i =0; i < halfRegsLength; ++i)
-            {
-                reg32::HalfRef low(regs[i].low()), high(regs[i].high());
-                halfRegs[i] = &low;
-                halfRegs[i + halfRegsLength] = &high;
-            }
-        }
+        commandDecoder(commandProcesser* cmds, reg32* regsN, reg32* segsN, uint32_t* timEN, Ram* ramG, uint16_t* PIDN)
+         : cmdPcsr(cmds), regs(regsN), segs(segsN), timE(timEN), ramP(ramG), PID(PIDN), halfRegs{
+            reg32::HalfRef(regsN[0], 0), reg32::HalfRef(regsN[1], 0), reg32::HalfRef(regsN[2], 0), reg32::HalfRef(regsN[3], 0),
+            reg32::HalfRef(regsN[0], 16), reg32::HalfRef(regsN[1], 16), reg32::HalfRef(regsN[2], 16), reg32::HalfRef(regsN[3], 16)
+         }
+        {}
 
         
         /*
@@ -1402,9 +1409,9 @@ private:
             return isDead || isUA;
         }
 
-        void decode(uint8_t* commands[commandsArr_maxize])
+        void decode(uint8_t* commands)
         {
-            uint8_t opcode = *commands[0];
+            uint8_t opcode = commands[0];
 
             switch (opcode)
             {
@@ -1415,8 +1422,8 @@ private:
                 
                 case 0x00: // add reg reg, Bytes 2, [add, src(4)|dst(4)]
                 {
-                    uint8_t dstbase = (*commands[1] & 0x0f);
-                    uint8_t srcbase = (*commands[1] >> 4);
+                    uint8_t dstbase = (commands[1] & 0x0f);
+                    uint8_t srcbase = (commands[1] >> 4);
                     bool dstisHalf = (dstbase & 0b1000) != 0;
                     bool srcisHalf = (srcbase & 0b1000) != 0;
 
@@ -1427,12 +1434,12 @@ private:
                         if (srcisHalf) // src is HalfReg
                         {
                             uint8_t srcindex = std::min(srcbase & 0b0111, regs_maxize -1);
-                            cmdPcsr->add(halfRegs[dstindex], *halfRegs[srcindex]);
+                            cmdPcsr->add(&halfRegs[dstindex], halfRegs[srcindex]);
                         } 
                         else // src is FullReg
                         {
                             uint8_t srcindex = std::min(srcbase & 0b0111, regs_maxize -1);
-                            cmdPcsr->add(halfRegs[dstindex], (uint16_t)regs[srcindex]);
+                            cmdPcsr->add(&halfRegs[dstindex], (uint16_t)regs[srcindex]);
                         }
                     }
                     else // dst is FullReg
@@ -1442,7 +1449,7 @@ private:
                         if (srcisHalf) // src is HalfReg
                         {
                             uint8_t srcindex = std::min(srcbase & 0b0111, regs_maxize -1);
-                            cmdPcsr->add(&regs[dstindex], *halfRegs[srcindex]);
+                            cmdPcsr->add(&regs[dstindex], halfRegs[srcindex]);
                         } 
                         else // src is FullReg
                         {
@@ -1456,31 +1463,31 @@ private:
 
                 case 0x01: // add r/m32/16 m/r32/16, Bytes 7, [add, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
                 {
-                    uint8_t mode_RM_MR = (*commands[1] >> 7) & 0b1;
-                    uint8_t mode_32_16 = (*commands[1] >> 6) & 0b1;
-                    uint8_t regIndex = (*commands[1] & 0b0111);
-                    uint8_t segIndex = *commands[2] & 0b111;
-                    bool isHalf = (*commands[1] & 0b1000) != 0;
+                    uint8_t mode_RM_MR = (commands[1] >> 7) & 0b1;
+                    uint8_t mode_32_16 = (commands[1] >> 6) & 0b1;
+                    uint8_t regIndex = (commands[1] & 0b0111);
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = ((uint32_t)*commands[3] | ((uint32_t)*commands[4] << 8) 
-                        | ((uint32_t)*commands[5] << 16) | ((uint32_t)*commands[6] << 24)) + segs[segIndex].word() * ramSegs_maxize;
+                    uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegs_maxize;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // add r32/16 m32/16
                     {
                         if (mode_32_16 == 0b0) // add r32 m32
                         {
-                            memVal.word(ramP->read32(memAddr));
+                            memVal.word(ramP->read32(memAddr, *PID));
                             if (postProcessing_afterRamRW()) {return; }
                             cmdPcsr->add(&regs[regIndex], memVal);
                         }
                         else // add r32/16 m16
                         {
-                            memVal.low() = ramP->read16(memAddr);
+                            memVal.low() = ramP->read16(memAddr, *PID);
                             if (postProcessing_afterRamRW()) {return; }
                             uint16_t memVal16 = memVal.low();
 
-                            if (isHalf) {cmdPcsr->add(halfRegs[regIndex], memVal16); }
+                            if (isHalf) {cmdPcsr->add(&halfRegs[regIndex], memVal16); }
                             else {cmdPcsr->add(&regs[regIndex], memVal16); }
                         }
                     }
@@ -1488,20 +1495,20 @@ private:
                     {
                         if (mode_32_16 == 0b0) // add m32 r32
                         {
-                            memVal.word(ramP->read32(memAddr));
+                            memVal.word(ramP->read32(memAddr, *PID));
                             if (postProcessing_afterRamRW()) {return; }
                             cmdPcsr->add(&memVal, regs[regIndex]);
-                            ramP->write32(memAddr, memVal.word());
+                            ramP->write32(memAddr, memVal.word(), *PID);
                         }
                         else // add m16 r32/16(->val16)
                         {
-                            memVal.low() = ramP->read16(memAddr);
+                            memVal.low() = ramP->read16(memAddr, *PID);
                             if (postProcessing_afterRamRW()) {return; }
                             reg32::HalfRef memVal16 = memVal.low();
                             
-                            if (isHalf) {cmdPcsr->add(&memVal16, *halfRegs[regIndex]); }
+                            if (isHalf) {cmdPcsr->add(&memVal16, halfRegs[regIndex]); }
                             else {cmdPcsr->add(&memVal16, (uint16_t)regs[regIndex]); }
-                            ramP->write16(memAddr, memVal16);
+                            ramP->write16(memAddr, memVal16, *PID);
                         }
                     }
                     
@@ -1510,41 +1517,41 @@ private:
                 
                 case 0x02: // add m32/16 r32/16, Bytes 3, [add, ModR/M, s32]
                 {
-                    uint8_t mode = (*commands[1] >> 7) & 0b1;
-                    uint8_t srcRegIndex = (*commands[1] >> 3) & 0b0111;
-                    uint8_t baseRegIndex = *commands[1] & 0b111;
-                    uint8_t segIndex = *commands[2] & 0b111;
-                    bool isHalf = (*commands[1] & 0b1000) != 0;
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t srcRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegs_maxize;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // add mem32 r32/16
                     {
-                        memVal.word(ramP->read32(memAddr));
+                        memVal.word(ramP->read32(memAddr, *PID));
 
                         if (postProcessing_afterRamRW()) {return; }
                         
                         // HalfReg
-                        if (isHalf) {cmdPcsr->add(&memVal, *halfRegs[srcRegIndex]); }
+                        if (isHalf) {cmdPcsr->add(&memVal, halfRegs[srcRegIndex]); }
                         // FullReg
                         else {cmdPcsr->add(&memVal, regs[srcRegIndex]); }
 
-                        ramP->write32(memAddr, memVal.word());
+                        ramP->write32(memAddr, memVal.word(), *PID);
 
                     }
                     else // add mem16 r32/16
                     {
-                        memVal.low() = ramP->read16(memAddr);
+                        memVal.low() = ramP->read16(memAddr, *PID);
 
                         if (postProcessing_afterRamRW()) {return; }
 
                         // HalfReg
-                        if (isHalf) {cmdPcsr->add(&memVal, *halfRegs[srcRegIndex]); }
+                        if (isHalf) {cmdPcsr->add(&memVal, halfRegs[srcRegIndex]); }
                         // FullReg
                         else {cmdPcsr->add(&memVal, regs[srcRegIndex]); }
 
-                        ramP->write16(memAddr, memVal.low());
+                        ramP->write16(memAddr, memVal.low(), *PID);
 
                     }
 
@@ -1553,34 +1560,34 @@ private:
 
                 case 0x03: // add r32/16 m32/16, Bytes 3, [add, ModR/M, s32]
                 {
-                    uint8_t mode = (*commands[1] >> 7) & 0b1;
-                    uint8_t dstRegIndex = (*commands[1] >> 3) & 0b0111;
-                    uint8_t baseRegIndex = *commands[1] & 0b111;
-                    uint8_t segIndex = *commands[2] & 0b111;
-                    bool isHalf = (*commands[1] & 0b1000) != 0;
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t dstRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegs_maxize;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // add r32/16 mem32
                     {
-                        memVal |= ramP->read32(memAddr);
+                        memVal |= ramP->read32(memAddr, *PID);
 
                         if (postProcessing_afterRamRW()) {return; }
 
                         // HalfReg
-                        if (isHalf) {cmdPcsr->add(halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        if (isHalf) {cmdPcsr->add(&halfRegs[dstRegIndex], (uint16_t)memVal); }
                         // FullReg
                         else {cmdPcsr->add(&regs[dstRegIndex], memVal); }
                     }
                     else // add r32/16 mem16
                     {
-                        memVal |= ramP->read16(memAddr);
+                        memVal |= ramP->read16(memAddr, *PID);
 
                         if (postProcessing_afterRamRW()) {return; }
 
                         // HalfReg
-                        if (isHalf) {cmdPcsr->add(halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        if (isHalf) {cmdPcsr->add(&halfRegs[dstRegIndex], (uint16_t)memVal); }
                         // FullReg
                         else {cmdPcsr->add(&regs[dstRegIndex], memVal); }
                     }
@@ -1590,16 +1597,16 @@ private:
                 
                 case 0x04: // add AL imm16, Bytes 3, [add, immL, immH]
                 {
-                    uint16_t imm = ((uint16_t)*commands[1] | (uint16_t)*commands[2] << 8);
-                    cmdPcsr->add(halfRegs[0], imm);
+                    uint16_t imm = ((uint16_t)commands[1] | (uint16_t)commands[2] << 8);
+                    cmdPcsr->add(&halfRegs[0], imm);
 
                     break;
                 }
                 
                 case 0x05: // add AX imm32, Bytes 5, [add, immLL, immLH, immHL, immHH]
                 {
-                    uint32_t imm = ((uint32_t)*commands[1] | ((uint32_t)*commands[2] << 8) 
-                        | ((uint32_t)*commands[3] << 16) | ((uint32_t)*commands[4] << 24));
+                    uint32_t imm = ((uint32_t)commands[1] | ((uint32_t)commands[2] << 8) 
+                        | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->add(&regs[0], imm);
 
                     break;
@@ -1614,13 +1621,67 @@ private:
     {
     private:
         commandDecoder* cmDcdr;
+        uint16_t* PID;
         reg32* IP;
         reg32* segs;
+        reg32* regs;
+        reg32* CS = &segs[0];
         Ram* ramP;
+        uint8_t commandsBuffer[commandsArr_maxize] = {0};
 
     public:
-        commandAddressing(reg32* IPt, reg32* segsT, Ram* ramG)
-         : IP(IPt), segs(segsT), ramP(ramG) {}
+        commandAddressing(reg32* IPt, reg32* segsT, reg32* regsT, Ram* ramG, commandDecoder* cmDcdrG, uint16_t* PIDt)
+         : IP(IPt), segs(segsT), regs(regsT), ramP(ramG), cmDcdr(cmDcdrG), PID(PIDt) {}
+
+        bool postProcessing_afterRamRW()
+        {
+            bool isDead = ramP->get_deadState();
+            bool isDead2;
+            bool isUA = ramP->get_UAstate(*PID);
+            if (isUA)
+            {
+                // Unauthorized Access
+                regs[8].stbit(30);
+            }
+            if (isDead)
+            {
+                isDead2 = ramP->get_deadState();
+                if (isDead2)
+                {
+                    // Memory Overflow
+                    regs[8].stbit(31);
+                } else 
+                {return true; }
+            }
+            return isDead || isUA;
+        }
+
+        void ___readRam(uint32_t addr, uint8_t* buffer)
+        {
+            *buffer = ramP->read(addr, *PID);
+        }
+
+        void addressing()
+        {
+            uint32_t OPcode_addr = CS->word() * ramSegs_maxize + IP->word();
+            uint8_t opc = ramP->read(OPcode_addr, *PID);
+            //std::thread read_thread(&commandAddressing::readRam, this, OPcode_addr, &opc);
+            //read_thread.join();
+            if (postProcessing_afterRamRW()) {return; }
+
+            uint8_t commandLength = opCode_decodeTable[opc];
+            for (uint8_t index =0; index < commandLength; ++index)
+            {
+                uint8_t temp = ramP->read(OPcode_addr + index, *PID);
+                if (postProcessing_afterRamRW()) {return; }
+
+                commandsBuffer[index] = temp; 
+            }
+            IP->word(IP->word() + commandLength);
+            cmDcdr->decode(commandsBuffer);
+            //std::thread dcThread(&commandDecoder::decode, cmDcdr, commandsBuffer);
+            //dcThread.join();
+        }
     
     };
 
@@ -1649,13 +1710,8 @@ private:
     >>  MOF     31      1       Memory Overflow Flag;
     */
 
-    reg32 segs[8];
-    reg32& CS = segs[0];
-    reg32& DS = segs[1];
-    reg32& SS = segs[2];
-    reg32& ES = segs[3];
-    reg32& FS = segs[4];
-    reg32& GS = segs[5];
+    reg32 CS, DS, SS, ES, FS, GS, SS1, SS2;
+    reg32* segs[segs_maxize] = {&CS, &DS, &SS, &ES, &FS, &GS, &SS1, &SS2};
 
     reg32 AX, CX, DX, BX;
     reg32 SP, BP, SI, DI;
@@ -1663,18 +1719,19 @@ private:
 
     reg32 IP;
     
-    commandProcesser cmdPcsr{&FLAG, &AX, &DX, &timE, ramP};
+    commandProcesser* cmdPcsr = new commandProcesser(&FLAG, &AX, &DX, &timE, ramP);
+    commandDecoder* cmdDcdr = new commandDecoder(cmdPcsr, *regs, *segs, &timE, ramP, &PID);
+    commandAddressing* cmdAdr = new commandAddressing(&IP, *segs, *regs, ramP, cmdDcdr, &PID);
     
     std::map<uint16_t, devIO*> devsRegistry;
 
 public:
-    Center32x(uint32_t ID, Ram* ramG)
+    Center32x(uint32_t ID, Ram* ramG) : ramP(ramG)
     {
         IDt = ID;
         UD = Hasher::hash_uint32(IDt);
         uint8_t temp = UD & 0b0111;
         EID = Hasher::get_randNumHR2(UD, temp);
-        ramP = ramG;
     }
 
     void start() {runningState = true; }
@@ -1700,7 +1757,7 @@ public:
     {
         for (int index =0; index < segs_maxize; ++index)
         {
-            dstArray[index].word(segs[index].word());
+            dstArray[index].word(segs[index]->word());
         }
     }
     void getRegs(reg32* dstArray) const
@@ -1710,6 +1767,21 @@ public:
             dstArray[index].word(regs[index]->word());
         }
     }
+
+    void setPID(uint16_t PIDt) {PID = PIDt; }
+    int run_cycle()
+    {
+        if (!runningState) {return -1; }
+        if (FLAG.ckbit(1) || FLAG.ckbit(31) || FLAG.ckbit(30)) 
+        {stop(); return -1; }
+
+        cmdAdr->addressing();
+        //std::thread main_thread([this] {cmdAdr->addressing(); });
+        //main_thread.join();
+        return 0;
+    }
+    void loop()
+    {}
 
 };
 
@@ -1749,13 +1821,41 @@ public:
 
 
 
+static Hasher* ashor;
+
 bool initG()
 {
+    // init the OPcode-Decode-Table
+    if (opCode_decodeTable != nullptr)
+    {
+        memset(opCode_decodeTable, 0, opc_maxize +1);
+        {// ADD
+            opCode_decodeTable[0x00] = 2;
+            opCode_decodeTable[0x01] = 7;
+            opCode_decodeTable[0x02] = 3; 
+            opCode_decodeTable[0x03] = 3;
+            opCode_decodeTable[0x04] = 3;
+            opCode_decodeTable[0x05] = 5;
+        }
+    }
+    
+    // init the Hasher
+    ashor = new Hasher();
+
     return true;
 }
 
 void test() 
 {
+    uint16_t rootPID = 0x00;
+    Ram* ram1 = new Ram();
+    Center32x center1{0x00, ram1};
+    center1.setPID(rootPID);
+    ram1->write32(0x00, 0x00abcd04, rootPID);
+    if (ram1->get_deadState()) {printf("Memory Overflow"); }
+    std::cout << (int)ram1->read(0x00, rootPID) << std::endl;
+    center1.start();
+    center1.run_cycle();
     return;
 }
 
@@ -1763,7 +1863,6 @@ void test()
 int main()
 {
     initG();
-    Hasher ashor;
 
 
     //* test

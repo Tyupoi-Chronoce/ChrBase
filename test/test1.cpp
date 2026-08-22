@@ -16,5 +16,15 @@ void test()
     std::cout << (uint16_t)arr[256] << std::endl;
 }
 
+class Test
+{
+private:
+    uint16_t test;
+
+public:
+    void static bimbimbambam()
+    {}
+
+};
 
 

@@ -13,6 +13,8 @@
 #include <bitset>
 #include <mutex>
 #include <atomic>
+#include <fluidsynth.h>
+#include <stdexcept>
 
 /*
 #ifdef _WIN32
@@ -59,6 +61,7 @@ const uint32_t UKED_EntropyDev = 0xffe7c099;
 const uint32_t UKED_GraphicDev = 0xf6ca951c;
 const uint32_t UKED_Center2OPtransferDev = 0x7ca5fc20;
 const uint32_t UKED_Center2centerTransferDev = 0x7ca5fc2c;
+const uint32_t UKED_SoundCarDev = 0xf50dcacd;
 
 
 class Ram
@@ -544,6 +547,31 @@ private:
 public:
     GraphicDev(uint32_t ID, Hasher* hashG)
      : devIO(hashG->get_randNumHR2(ID), UKED_GraphicDev) {}
+
+};
+
+class SoundCarDev : public devIO
+{
+private:
+    std::string SFpathP;
+    fluid_settings_t* settings = nullptr;
+    fluid_synth_t* synthP = nullptr;
+    int sfont_id = -1;
+
+public:
+    SoundCarDev(uint32_t ID, Hasher* hashG, std::string SFpath)
+     : devIO(hashG->get_randNumHR2(ID), UKED_SoundCarDev), SFpathP(SFpath) 
+    {
+        settings = new_fluid_settings(); // init the settings
+        fluid_settings_setnum(settings, "synth.sample-rate", 44100.0); // set the sampling rate
+        fluid_settings_setint(settings, "synth.verbose", 0); // turn off extra output
+
+        synthP = new_fluid_synth(settings); // chreate the synthesizer instance
+        if (!synthP) throw std::runtime_error("Failed to create synthesizer");
+
+        sfont_id = fluid_synth_sfload(synthP, SFpathP.c_str(), 1); // load the SF2 file
+        if (sfont_id == -1) throw std::runtime_error("Failed to load SF2 file");
+    }
 
 };
 

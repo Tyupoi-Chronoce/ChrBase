@@ -4,5 +4,6 @@
 int main()
 {
     test();
+    Test::bimbimbambam();
     return 0;
 }

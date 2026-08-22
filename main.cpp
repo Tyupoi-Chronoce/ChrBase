@@ -10,22 +10,6 @@
 #include <vector>
 #include <map>
 #include <thread>
-#include <bitset>
-#include <mutex>
-#include <atomic>
-#include <fluidsynth.h>
-#include <stdexcept>
-
-/*
-#ifdef _WIN32
-#include <windows.h>
-HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-DWORD dwMode = 0;
-GetConsoleMode(hOut, &dwMode);
-dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-SetConsoleMode(hOut, dwMode);
-#endif
-//*/
 
 
 
@@ -55,13 +39,7 @@ const uint32_t ramSegPer_maxize = 262144;   // 256 KiB
 const uint16_t opc_maxize = 0xff;
 
 const uint8_t dead_magicNum = 0xcc;
-uint8_t* opCode_decodeTable = new uint8_t[opc_maxize +1]();
-
-const uint32_t UKED_EntropyDev = 0xffe7c099;
-const uint32_t UKED_GraphicDev = 0xf6ca951c;
-const uint32_t UKED_Center2OPtransferDev = 0x7ca5fc20;
-const uint32_t UKED_Center2centerTransferDev = 0x7ca5fc2c;
-const uint32_t UKED_SoundCarDev = 0xf50dcacd;
+uint8_t* opCode_decodeTable = new uint8_t[opc_maxize +1];
 
 
 class Ram
@@ -523,58 +501,7 @@ private:
 public:
     devIO(uint32_t ID, uint32_t UKED) : UEID(ID), UKUEUD(UKED) {}
 
-    uint32_t get_UEID() const {return UEID; }
-    uint32_t get_UKED() const {return UKUEUD; }
-
 };
-
-class EntropyDev : public devIO
-{
-private:
-    Hasher* hashP;
-
-public:
-    EntropyDev(uint32_t ID, Hasher* hashG)
-     : hashP(hashG), devIO(hashP->get_randNumHR2(ID), UKED_EntropyDev) {}
-
-};
-
-class GraphicDev : public devIO
-{
-private:
-    uint8_t GramD[gram_maxize] = {0};
-
-public:
-    GraphicDev(uint32_t ID, Hasher* hashG)
-     : devIO(hashG->get_randNumHR2(ID), UKED_GraphicDev) {}
-
-};
-
-class SoundCarDev : public devIO
-{
-private:
-    std::string SFpathP;
-    fluid_settings_t* settings = nullptr;
-    fluid_synth_t* synthP = nullptr;
-    int sfont_id = -1;
-
-public:
-    SoundCarDev(uint32_t ID, Hasher* hashG, std::string SFpath)
-     : devIO(hashG->get_randNumHR2(ID), UKED_SoundCarDev), SFpathP(SFpath) 
-    {
-        settings = new_fluid_settings(); // init the settings
-        fluid_settings_setnum(settings, "synth.sample-rate", 44100.0); // set the sampling rate
-        fluid_settings_setint(settings, "synth.verbose", 0); // turn off extra output
-
-        synthP = new_fluid_synth(settings); // chreate the synthesizer instance
-        if (!synthP) throw std::runtime_error("Failed to create synthesizer");
-
-        sfont_id = fluid_synth_sfload(synthP, SFpathP.c_str(), 1); // load the SF2 file
-        if (sfont_id == -1) throw std::runtime_error("Failed to load SF2 file");
-    }
-
-};
-
 
 class Center32x
 {

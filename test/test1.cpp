@@ -16,6 +16,7 @@ void test()
     std::cout << (uint16_t)arr[256] << std::endl;
 }
 
+<<<<<<< HEAD
 class Test
 {
 private:
@@ -26,5 +27,7 @@ public:
     {}
 
 };
+=======
+>>>>>>> af8bf87f2f8b5a5dab09168c3123711069c7115e
 
 

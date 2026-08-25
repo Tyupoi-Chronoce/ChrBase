@@ -16,18 +16,29 @@ void test()
     std::cout << (uint16_t)arr[256] << std::endl;
 }
 
-<<<<<<< HEAD
 class Test
 {
 private:
     uint16_t test;
 
 public:
-    void static bimbimbambam()
-    {}
+    void static bimbimbambam() {std::cout << "BT1" << std::endl; }
 
 };
-=======
->>>>>>> af8bf87f2f8b5a5dab09168c3123711069c7115e
+
+
+namespace TEST
+{
+    void test()
+    {
+
+    }
+    class Test
+    {
+    public:
+        static void bimbimbambam() {std::cout << "BT2" << std::endl; }
+        
+    };
+}
 
 

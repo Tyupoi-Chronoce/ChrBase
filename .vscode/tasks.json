@@ -11,6 +11,7 @@
                 "-Llibs",
                 "${file}",
                 "-lfluidsynth-3",
+                "-lSDL3",
                 "-o",
                 "${fileDirname}\\${fileBasenameNoExtension}.exe"
             ],

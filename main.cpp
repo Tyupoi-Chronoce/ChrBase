@@ -15,6 +15,7 @@
 #include <atomic>
 #include <fluidsynth.h>
 #include <stdexcept>
+#include <SDL.h>
 
 /*
 #ifdef _WIN32
@@ -44,13 +45,14 @@ SetConsoleMode(hOut, dwMode);
 */
 
 
-const std::string version = "0.1.4T";
+const std::string version = "0.1.7T";
 const int centers_maxize = 4;
 const int regs_maxize = 9;
 const int segs_maxize = 8;
 const int commandsArr_maxize = 10;
 const uint8_t info2devIObuffer_maxize = 10;
 const uint32_t ram_maxize = 0x7fffffff;     // uint8 -> 1 Byte * 0x7fffffff => ~ 2 GiB
+const uint32_t ram_minSize = 0x7ffffff;     // uint8 -> 1 Byte * 0xfffffff => ~ 128 MiB
 const uint32_t stack_maxize = 0xfffff;      // uint8 -> 1 Byte * 0xfffff => ~ 1 MiB
 const uint32_t gram_maxize = 0xfffffff;     // uint8 -> 1 Byte * 0xfffffff => ~ 256 MiB
 const uint32_t ramSegPer_maxize = 262144;   // 256 KiB per Segment in RAM
@@ -65,6 +67,7 @@ const uint32_t UKED_EntropyDev = 0xffe7c099;
 const uint32_t UKED_GraphicDev = 0xf6ca951c;
 const uint32_t UKED_Center2OPtransferDev = 0x7ca5fc20;
 const uint32_t UKED_Center2centerTransferDev = 0x7ca5fc2c;
+const uint32_t UKED_VoiceCarDev = 0xc015cacd;
 const uint32_t UKED_SoundCarDev = 0xf50dcacd;
 
 
@@ -74,9 +77,9 @@ private:
     uint32_t ram_size;
     uint32_t stackGeneral_endIndex, stackSegReg_endIndex, stackFLAGS_endIndex;
     const static uint32_t ramSegs_size = ramSegPer_maxize;
-    const static uint32_t ramSegs_maxcount = ram_maxize / ramSegPer_maxize;
     const static uint32_t PID_maxize = 0xffff;
     const static uint16_t rootPID = 0x00, constPID = 0x01, publicPID = 0xffff;
+    const uint32_t ramSegs_maxcount = ram_size / ramSegs_size;
     mutable uint32_t read_times = 0;
     mutable uint32_t write_times = 0;
     mutable bool deadState_temp = false;
@@ -86,14 +89,14 @@ private:
     // 0x00 is root PID, same means it s locked for other Processes tha cant visit;
     // 0x01 is const PID, same means every Process can visit tha ram segmentation locked by it but read only except root PID;
     // 0xffff is public PID, same means every Process can visit the ram segmentation locked by it;
-    mutable uint8_t ramSgmtation_LocktPID[ramSegs_maxcount] = {0x00};
+    mutable uint16_t* ramSgmtation_LocktPID = new uint16_t[ramSegs_maxcount]();
 
 public:
     std::mutex raMutexC;
 
 
     Ram(uint32_t ramSizeT=ram_maxize)
-     : ram_size(std::min(ram_maxize, std::max(ramSegPer_maxize, ramSizeT))), ramD(new uint8_t[ram_size +1]()),
+     : ram_size(std::min(ram_maxize, std::max(ram_minSize, ramSizeT))), ramD(new uint8_t[ram_size +1]()),
       stackGeneral_endIndex(ram_size - stack_maxize),
        stackSegReg_endIndex(stackGeneral_endIndex - stack_maxize),
         stackFLAGS_endIndex(stackSegReg_endIndex - stack_maxize) {}
@@ -101,7 +104,7 @@ public:
     bool PIDcanRead(uint32_t index, uint16_t PID) const
     {
         uint32_t index_ramSeg = index / ramSegs_size;
-        uint8_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
+        uint16_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
         if (ramPID == rootPID) {return false; }
         if (ramPID == constPID) {return true; }
         if (ramPID == publicPID) {return true; }
@@ -110,7 +113,7 @@ public:
     bool PIDcanWrite(uint32_t index, uint16_t PID) const
     {
         uint32_t index_ramSeg = index / ramSegs_size;
-        uint8_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
+        uint16_t ramPID = ramSgmtation_LocktPID[index_ramSeg];
         if (ramPID == rootPID) {return false; }
         if (ramPID == constPID) {return false; }
         if (ramPID == publicPID) {return true; }
@@ -243,6 +246,8 @@ public:
     uint32_t get_readTimes() const {return read_times; }
     uint32_t get_writeTimes() const {return write_times; }
 
+    void setSegPID(uint32_t index_ramSeg, uint16_t PIDt) {ramSgmtation_LocktPID[index_ramSeg] = PIDt; }
+
 
     /*
     uint8_t operator[](uint32_t index) const
@@ -261,6 +266,12 @@ public:
         write_times++;
         return ramD[index];
     } //*/
+
+    ~Ram()
+    {
+        delete[] ramD;
+        delete[] ramSgmtation_LocktPID;
+    }
 
 };
 
@@ -532,12 +543,12 @@ class Screen
 private:
     uint16_t Width;
     uint16_t Height;
-    uint8_t* outBuffer;
-    uint8_t* pageBuffer;
+    uint32_t* outBuffer;
+    uint32_t* pageBuffer;
 
 public:
     Screen(uint16_t width=screen_maxWidth, uint16_t height=screen_maxHeight)
-     : Width(width), Height(height), outBuffer(new uint8_t[width * height]()), pageBuffer(new uint8_t[width * height]()) {}
+     : Width(width), Height(height), outBuffer(new uint32_t[width * height]()), pageBuffer(new uint32_t[width * height]()) {}
 
     uint16_t get_Width() const {return Width; }
     uint16_t get_Height() const {return Height; }
@@ -545,19 +556,23 @@ public:
 };
 
 
+/*
+    This base class provides a general IO interface for the Center class.
+    Subclasses that publicly inherit from it will handle the incoming and saved information internally according to their own definitions
+*/
 class devIO
 {
 private:
     uint32_t UEID;
     uint32_t UKUEUD;
+    uint8_t* infoBuffer;
+    uint8_t* outBuffer;
     std::mutex infoMutexC;
     bool IOstate = false;
 
 public:
     std::mutex devMutexC;
     uint8_t* buffer;
-    uint8_t* infoBuffer;
-    uint8_t* outBuffer;
     uint8_t infoBufferHeadPointer = 0;
     uint8_t outBufferHeadPointer = 0;
 
@@ -587,7 +602,8 @@ public:
         outBufferHeadPointer--;
         return outBuffer[outBufferHeadPointer +1];
     }
-
+    void _savInfo() {memcpy(buffer, infoBuffer, info2devIObuffer_maxize); }
+    
 };
 
 class EntropyDev : public devIO
@@ -605,15 +621,15 @@ class GraphicDev : public devIO
 {
 private:
     uint8_t GramD[gram_maxize] = {0};
-    Screen* screenP = nullptr;
+    Screen* screenP;
 
 public:
-    GraphicDev(uint32_t ID, Hasher* hashG)
-     : devIO(hashG->get_randNumHR2(ID), UKED_GraphicDev) {}
+    GraphicDev(uint32_t ID, Hasher* hashG, Screen* screenG=nullptr)
+     : devIO(hashG->get_randNumHR2(ID), UKED_GraphicDev), screenP(screenG) {}
 
 };
 
-class SoundCarDev : public devIO
+class VoiceCarDev : public devIO
 {
 private:
     std::string SFpathP;
@@ -622,8 +638,8 @@ private:
     int sfont_id = -1;
 
 public:
-    SoundCarDev(uint32_t ID, Hasher* hashG, std::string SFpath)
-     : devIO(hashG->get_randNumHR2(ID), UKED_SoundCarDev), SFpathP(SFpath) 
+    VoiceCarDev(uint32_t ID, Hasher* hashG, std::string SFpath)
+     : devIO(hashG->get_randNumHR2(ID), UKED_VoiceCarDev), SFpathP(SFpath) 
     {
         settings = new_fluid_settings(); // init the settings
         fluid_settings_setnum(settings, "synth.sample-rate", 44100.0); // set the sampling rate
@@ -660,11 +676,22 @@ public:
         return output;
     }
 
-    ~SoundCarDev()
+    ~VoiceCarDev()
     {
         if (synthP) {delete_fluid_synth(synthP); }
         if (settings) {delete_fluid_settings(settings); }
     }
+
+};
+
+class SoundCarDev : public devIO
+{
+private:
+    uint32_t Volume;
+
+public:
+    SoundCarDev(uint32_t ID, Hasher* hashG)
+     : devIO(hashG->get_randNumHR2(ID), UKED_SoundCarDev) {}
 
 };
 
@@ -1519,6 +1546,16 @@ private:
             copyT1.low() = 0;
         }
         
+    };
+
+    class IOmanager
+    {
+    private:
+        std::map<uint16_t, devIO*>* devsRegistryP;
+
+    public:
+        IOmanager() {}
+
     };
 
     class commandDecoder
@@ -2750,6 +2787,435 @@ private:
                     break;
                 }
 
+                case 0x30: // xor reg reg, Bytes 2, [xor, src(4)|dst(4)]
+                {
+                    uint8_t dstBase = (commands[1] & 0x0f);
+                    uint8_t srcBase = (commands[1] >> 4);
+                    bool dstIsHalf = (dstBase & 0b1000) != 0;
+                    bool srcIsHalf = (srcBase & 0b1000) != 0;
+
+                    if (dstIsHalf) // dst is HalfReg
+                    {
+                        uint8_t dstIndex = std::min(dstBase & 0b0111, regs_maxize -1);
+
+                        if (srcIsHalf) // src is HalfReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->xorL(&halfRegs[dstIndex], halfRegs[srcIndex]);
+                        } 
+                        else // src is FullReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->xorL(&halfRegs[dstIndex], (uint16_t)regs[srcIndex]);
+                        }
+                    }
+                    else // dst is FullReg
+                    {
+                        uint8_t dstIndex = std::min(dstBase & 0b0111, regs_maxize -1);
+
+                        if (srcIsHalf) // src is HalfReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->xorL(&regs[dstIndex], halfRegs[srcIndex]);
+                        } 
+                        else // src is FullReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->xorL(&regs[dstIndex], regs[srcIndex]);
+                        }
+                    }
+
+                    break;
+                }
+
+                case 0x31: // xor r/m32/16 m/r32/16, Bytes 7, [xor, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
+                {
+                    uint8_t mode_RM_MR = (commands[1] >> 7) & 0b1;
+                    uint8_t mode_32_16 = (commands[1] >> 6) & 0b1;
+                    uint8_t regIndex = (commands[1] & 0b0111);
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                    reg32 memVal = 0;
+
+                    if (mode_RM_MR == 0b0) // xor r32/16 m32/16
+                    {
+                        if (mode_32_16 == 0b0) // xor r32 m32
+                        {
+                            memVal.word(ramP->read32(memAddr, *PID));
+                            if (postProcessing_afterRamRW()) {return; }
+                            cmdPcsr->xorL(&regs[regIndex], memVal);
+                        }
+                        else // xor r32/16 m16
+                        {
+                            memVal.low() = ramP->read16(memAddr, *PID);
+                            if (postProcessing_afterRamRW()) {return; }
+                            uint16_t memVal16 = memVal.low();
+
+                            if (isHalf) {cmdPcsr->xorL(&halfRegs[regIndex], memVal16); }
+                            else {cmdPcsr->xorL(&regs[regIndex], memVal16); }
+                        }
+                    }
+                    else // xor m32/16 r32/16
+                    {
+                        if (mode_32_16 == 0b0) // xor m32 r32
+                        {
+                            memVal.word(ramP->read32(memAddr, *PID));
+                            if (postProcessing_afterRamRW()) {return; }
+                            cmdPcsr->xorL(&memVal, regs[regIndex]);
+                            ramP->write32(memAddr, memVal.word(), *PID);
+                        }
+                        else // xor m16 r32/16(->val16)
+                        {
+                            memVal.low() = ramP->read16(memAddr, *PID);
+                            if (postProcessing_afterRamRW()) {return; }
+                            reg32::HalfRef memVal16 = memVal.low();
+                            
+                            if (isHalf) {cmdPcsr->xorL(&memVal16, halfRegs[regIndex]); }
+                            else {cmdPcsr->xorL(&memVal16, (uint16_t)regs[regIndex]); }
+                            ramP->write16(memAddr, memVal16, *PID);
+                        }
+                    }
+                    
+                    break;
+                }
+
+                case 0x32: // xor m32/16 r32/16, Bytes 3, [xor, ModR/M, s32]
+                {
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t srcRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    reg32 memVal = 0;
+
+                    if (mode == 0b0) // xor mem32 r32/16
+                    {
+                        memVal.word(ramP->read32(memAddr, *PID));
+
+                        if (postProcessing_afterRamRW()) {return; }
+                        
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->xorL(&memVal, halfRegs[srcRegIndex]); }
+                        // FullReg
+                        else {cmdPcsr->xorL(&memVal, regs[srcRegIndex]); }
+
+                        ramP->write32(memAddr, memVal.word(), *PID);
+
+                    }
+                    else // xor mem16 r32/16
+                    {
+                        memVal.low() = ramP->read16(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->xorL(&memVal, halfRegs[srcRegIndex]); }
+                        // FullReg
+                        else {cmdPcsr->xorL(&memVal, regs[srcRegIndex]); }
+
+                        ramP->write16(memAddr, memVal.low(), *PID);
+
+                    }
+
+                    break;
+                }
+
+                case 0x33: // xor r32/16 m32/16, Bytes 3, [xor, ModR/M, s32]
+                {
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t dstRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memVal = 0;
+
+                    if (mode == 0b0) // xor r32/16 mem32
+                    {
+                        memVal |= ramP->read32(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->xorL(&halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        // FullReg
+                        else {cmdPcsr->xorL(&regs[dstRegIndex], memVal); }
+                    }
+                    else // xor r32/16 mem16
+                    {
+                        memVal |= ramP->read16(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->xorL(&halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        // FullReg
+                        else {cmdPcsr->xorL(&regs[dstRegIndex], memVal); }
+                    }
+
+                    break;
+                }
+
+                case 0x34: // xor AL imm16, Bytes 3, [xor, immL, immH]
+                {
+                    uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
+                    cmdPcsr->xorL(&halfRegs[0], imm);
+
+                    break;
+                }
+
+                case 0x35: // xor AX imm32, Bytes 5, [xor, immLL, immLH, immHL, immHH]
+                {
+                    uint32_t imm = ((uint32_t)commands[1] | ((uint32_t)commands[2] << 8)
+                        | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
+                    cmdPcsr->xorL(&regs[0], imm);
+
+                    break;
+                }
+
+                case 0x38: // cmp reg reg, Bytes 2, [cmp, src(4)|dst(4)]
+                {
+                    uint8_t dstBase = (commands[1] & 0x0f);
+                    uint8_t srcBase = (commands[1] >> 4);
+                    bool dstIsHalf = (dstBase & 0b1000) != 0;
+                    bool srcIsHalf = (srcBase & 0b1000) != 0;
+
+                    if (dstIsHalf) // dst is HalfReg
+                    {
+                        uint8_t dstIndex = std::min(dstBase & 0b0111, regs_maxize -1);
+
+                        if (srcIsHalf) // src is HalfReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->cmp(halfRegs[dstIndex], halfRegs[srcIndex]);
+                        } 
+                        else // src is FullReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->cmp(halfRegs[dstIndex], (uint16_t)regs[srcIndex]);
+                        }
+                    }
+                    else // dst is FullReg
+                    {
+                        uint8_t dstIndex = std::min(dstBase & 0b0111, regs_maxize -1);
+
+                        if (srcIsHalf) // src is HalfReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->cmp(regs[dstIndex], halfRegs[srcIndex]);
+                        } 
+                        else // src is FullReg
+                        {
+                            uint8_t srcIndex = std::min(srcBase & 0b0111, regs_maxize -1);
+                            cmdPcsr->cmp(regs[dstIndex], regs[srcIndex]);
+                        }
+                    }
+
+                    break;
+                }
+
+                case 0x39: // cmp r/m32/16 m/r32/16, Bytes 7, [cmp, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
+                {
+                    uint8_t mode_RM_MR = (commands[1] >> 7) & 0b1;
+                    uint8_t mode_32_16 = (commands[1] >> 6) & 0b1;
+                    uint8_t regIndex = (commands[1] & 0b0111);
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                    reg32 memVal = 0;
+
+                    if (mode_RM_MR == 0b0) // cmp r32/16 m32/16
+                    {
+                        if (mode_32_16 == 0b0) // cmp r32 m32
+                        {
+                            memVal.word(ramP->read32(memAddr, *PID));
+                            if (postProcessing_afterRamRW()) {return; }
+                            cmdPcsr->cmp(regs[regIndex], memVal);
+                        }
+                        else // cmp r32/16 m16
+                        {
+                            memVal.low() = ramP->read16(memAddr, *PID);
+                            if (postProcessing_afterRamRW()) {return; }
+                            uint16_t memVal16 = memVal.low();
+
+                            if (isHalf) {cmdPcsr->cmp(halfRegs[regIndex], memVal16); }
+                            else {cmdPcsr->cmp(regs[regIndex], memVal16); }
+                        }
+                    }
+                    else // cmp m32/16 r32/16
+                    {
+                        if (mode_32_16 == 0b0) // cmp m32 r32
+                        {
+                            memVal.word(ramP->read32(memAddr, *PID));
+                            if (postProcessing_afterRamRW()) {return; }
+                            cmdPcsr->cmp(memVal, regs[regIndex]);
+                        }
+                        else // cmp m16 r32/16(->val16)
+                        {
+                            memVal.low() = ramP->read16(memAddr, *PID);
+                            if (postProcessing_afterRamRW()) {return; }
+                            reg32::HalfRef memVal16 = memVal.low();
+                            
+                            if (isHalf) {cmdPcsr->cmp(memVal16, halfRegs[regIndex]); }
+                            else {cmdPcsr->cmp(memVal16, (uint16_t)regs[regIndex]); }
+                        }
+                    }
+                    
+                    break;
+                }
+
+                case 0x3a: // cmp m32/16 r32/16, Bytes 3, [cmp, ModR/M, s32]
+                {
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t srcRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    reg32 memVal = 0;
+
+                    if (mode == 0b0) // cmp mem32 r32/16
+                    {
+                        memVal.word(ramP->read32(memAddr, *PID));
+
+                        if (postProcessing_afterRamRW()) {return; }
+                        
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->cmp(memVal, halfRegs[srcRegIndex]); }
+                        // FullReg
+                        else {cmdPcsr->cmp(memVal, regs[srcRegIndex]); }
+
+                    }
+                    else // cmp mem16 r32/16
+                    {
+                        memVal.low() = ramP->read16(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->cmp(memVal, halfRegs[srcRegIndex]); }
+                        // FullReg
+                        else {cmdPcsr->cmp(memVal, regs[srcRegIndex]); }
+
+                    }
+
+                    break;
+                }
+
+                case 0x3b: // cmp r32/16 m32/16, Bytes 3, [cmp, ModR/M, s32]
+                {
+                    uint8_t mode = (commands[1] >> 7) & 0b1;
+                    uint8_t dstRegIndex = (commands[1] >> 3) & 0b0111;
+                    uint8_t baseRegIndex = commands[1] & 0b111;
+                    uint8_t segIndex = commands[2] & 0b111;
+                    bool isHalf = (commands[1] & 0b1000) != 0;
+
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memVal = 0;
+
+                    if (mode == 0b0) // cmp r32/16 mem32
+                    {
+                        memVal |= ramP->read32(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->cmp(halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        // FullReg
+                        else {cmdPcsr->cmp(regs[dstRegIndex], memVal); }
+                    }
+                    else // cmp r32/16 mem16
+                    {
+                        memVal |= ramP->read16(memAddr, *PID);
+
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        // HalfReg
+                        if (isHalf) {cmdPcsr->cmp(halfRegs[dstRegIndex], (uint16_t)memVal); }
+                        // FullReg
+                        else {cmdPcsr->cmp(regs[dstRegIndex], memVal); }
+                    }
+
+                    break;
+                }
+
+                case 0x3c: // cmp AL imm16, Bytes 3, [cmp, immL, immH]
+                {
+                    uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
+                    cmdPcsr->cmp(halfRegs[0], imm);
+
+                    break;
+                }
+
+                case 0x3d: // cmp AX imm32, Bytes 5, [cmp, immLL, immLH, immHL, immHH]
+                {
+                    uint32_t imm = ((uint32_t)commands[1] | ((uint32_t)commands[2] << 8)
+                        | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
+                    cmdPcsr->cmp(regs[0], imm);
+
+                    break;
+                }
+
+                case 0x40: // inc AX, Bytes 1, [inc/0]
+                {
+                    cmdPcsr->inc(&regs[0]);
+                    break;
+                }
+
+                case 0x41: // inc CX, Bytes 1, [inc/1]
+                {
+                    cmdPcsr->inc(&regs[1]);
+                    break;
+                }
+
+                case 0x42: // inc DX, Bytes 1, [inc/2]
+                {
+                    cmdPcsr->inc(&regs[2]);
+                    break;
+                }
+
+                case 0x43: // inc BX, Bytes 1, [inc/3]
+                {
+                    cmdPcsr->inc(&regs[3]);
+                    break;
+                }
+
+                case 0x44: // inc SP, Bytes 1, [inc/4]
+                {
+                    cmdPcsr->inc(&regs[4]);
+                    break;
+                }
+
+                case 0x45: // inc BP, Bytes 1, [inc/5]
+                {
+                    cmdPcsr->inc(&regs[5]);
+                    break;
+                }
+
+                case 0x46: // inc SI, Bytes 1, [inc/6]
+                {
+                    cmdPcsr->inc(&regs[6]);
+                    break;
+                }
+
+                case 0x47: // inc DI, Bytes 1, [inc/7]
+                {
+                    cmdPcsr->inc(&regs[7]);
+                    break;
+                }
+
+                case 0x48:
+                {}
+
             }
         }
     
@@ -2889,7 +3355,7 @@ public:
 
     Center32x(uint32_t ID, Ram* ramG)
      : ramP(ramG), stackG_endIndex(ramP->get_generalEndIndex()), stackS_endIndex(ramP->get_segRegEndIndex()), stackF_endIndex(ramP->get_flagsEndIndex()),
-        stackG_headIndex(ramP->get_ramSize() -4), stackS_headIndex(stackG_endIndex -4), stackF_headIndex(stackS_endIndex -4)
+        stackG_headIndex(ramP->get_ramSize()), stackS_headIndex(stackG_endIndex), stackF_headIndex(stackS_endIndex)
     {
         IDt = ID;
         UD = Hasher::hash_uint32(IDt);
@@ -2942,6 +3408,24 @@ public:
     bool getRunningState() const {return runningState; }
     uint64_t getRunningTimes() const {return runningTimes; }
 
+    void register_port(uint16_t port, devIO* devG)
+    {
+        std::unique_lock<std::mutex> centerLock(centerMutexC);
+        std::unique_lock<std::mutex> devLock(devG->devMutexC);
+        devsRegistry[port] = devG;
+    }
+    void unregister_port(uint16_t port)
+    {
+        std::unique_lock<std::mutex> centerLock(centerMutexC);
+        auto dev = devsRegistry.find(port);
+        if (dev != devsRegistry.end())
+        {
+            std::unique_lock<std::mutex> devLock(devsRegistry[port]->devMutexC);
+            devsRegistry.erase(dev);
+        }
+    }
+    void staticRegister_port(uint16_t port, devIO* devG) {devsRegistry[port] = devG; }
+
     int run_cycle()
     {
         std::lock_guard<std::mutex> centerLock(centerMutexC);
@@ -2993,7 +3477,9 @@ private:
     reg32 segs_0f_centers[centers_maxize][segs_maxize];
     std::atomic<bool> runState_0f_centers[centers_maxize];
     const int linesPerCenter = 6;
-    const int linesT = centers_maxize * linesPerCenter;
+    const int lines4Command_and_return = 2;
+    const int linesT = centers_maxize * linesPerCenter + lines4Command_and_return;
+    const int commandBufferMaxize_unitBytes = 32;
     mutable uint16_t AL, AH, CL, CH, DL, DH, BL, BH, PID;
     mutable uint32_t SP, BP, SI, DI, CS, DS, SS, ES, FS, GS, SS1, SS2, IP, flags, FP;
     mutable uint64_t runningTimes;
@@ -3100,6 +3586,9 @@ public:
             printf("----==end %02x\t\t\t\t\t\t\t\n", index);
         }
 
+        std::cout << "command:\tNone" << std::endl;
+        std::cout << "lastReturn:\tNone" << std::endl;
+
         std::cout.flush();
         fflush(stdout);
         movCursorUP();
@@ -3187,6 +3676,32 @@ bool initG()
             opCode_decodeTable[0x2c] = 3;
             opCode_decodeTable[0x2d] = 5;
         }
+        {// XOR
+            opCode_decodeTable[0x30] = 2;
+            opCode_decodeTable[0x31] = 7;
+            opCode_decodeTable[0x32] = 3;
+            opCode_decodeTable[0x33] = 3;
+            opCode_decodeTable[0x34] = 3;
+            opCode_decodeTable[0x35] = 5;
+        }
+        {// CMP
+            opCode_decodeTable[0x38] = 2;
+            opCode_decodeTable[0x39] = 7;
+            opCode_decodeTable[0x3a] = 3;
+            opCode_decodeTable[0x3b] = 3;
+            opCode_decodeTable[0x3c] = 3;
+            opCode_decodeTable[0x3d] = 5;
+        }
+        {// INC
+            opCode_decodeTable[0x40] = 1;
+            opCode_decodeTable[0x41] = 1;
+            opCode_decodeTable[0x42] = 1;
+            opCode_decodeTable[0x43] = 1;
+            opCode_decodeTable[0x44] = 1;
+            opCode_decodeTable[0x45] = 1;
+            opCode_decodeTable[0x46] = 1;
+            opCode_decodeTable[0x47] = 1;
+        }
 
     }
     
@@ -3198,7 +3713,7 @@ bool initG()
     return true;
 }
 
-void test() 
+void test() // just test for running
 {
     uint16_t rootPID = 0x00;
     Ram* ram1 = new Ram(0x3fffffff);// ~ 1 GiB
@@ -3223,7 +3738,7 @@ void test()
     }
     ram2->write(0x00, 0x1d, rootPID);
     ram2->write32(0x01, 0xffffffff, rootPID);
-    if (ram1->get_deadState()) {printf("Memory Overflow"); }
+    if (ram1->get_deadState() || ram2->get_deadState()) {printf("Memory Overflow\n"); return; }
     center1.start();
     center2.start(); center3.start(); center4.start();
     std::thread debugPrintThread(&debugCMD::loop, &debuger);

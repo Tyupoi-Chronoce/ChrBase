@@ -16,6 +16,7 @@
 #include <fluidsynth.h>
 #include <stdexcept>
 #include <SDL.h>
+#include <CKhash.h>
 
 /*
 #ifdef _WIN32
@@ -32,7 +33,7 @@ SetConsoleMode(hOut, dwMode);
 
 // ___<funcName> means been deprecated or its purpose is unclear, so better not to use  xP;
 // <<varName>T> or <<VARnAME>t> means Temp, Test or Total;
-// <<varName>G> means Global;
+// <<varName>G> means Global or General;
 // <<varName>P> means it Points to;
 // <<varName>E> means it s about Equipment;
 // <<varName>C> means current;
@@ -45,23 +46,37 @@ SetConsoleMode(hOut, dwMode);
 */
 
 
-const std::string version = "0.1.7T";
+const std::string version = "0.1.8T";
 const int centers_maxize = 4;
 const int regs_maxize = 9;
 const int segs_maxize = 8;
 const int commandsArr_maxize = 10;
-const uint8_t info2devIObuffer_maxize = 10;
+const uint8_t info2devIObuffer_maxize = 16;
+const uint8_t regsPer_Gcenter_maxize = 0xff;
+const uint8_t regsPer_Gcenter_minSize = 0x0f;
+const uint8_t corePer_Gcenter_maxize = 0xff;
+const uint8_t corePer_Gcenter_minSize = 0x0f;
+const uint8_t centersPer_GraphDev_maxize = 0x10;
+const uint8_t centersPer_GraphDev_minSize = 0x04;
 const uint32_t ram_maxize = 0x7fffffff;     // uint8 -> 1 Byte * 0x7fffffff => ~ 2 GiB
 const uint32_t ram_minSize = 0x7ffffff;     // uint8 -> 1 Byte * 0xfffffff => ~ 128 MiB
 const uint32_t stack_maxize = 0xfffff;      // uint8 -> 1 Byte * 0xfffff => ~ 1 MiB
 const uint32_t gram_maxize = 0xfffffff;     // uint8 -> 1 Byte * 0xfffffff => ~ 256 MiB
-const uint32_t ramSegPer_maxize = 262144;   // 256 KiB per Segment in RAM
-const uint16_t opc_maxize = 0xff;
+const uint32_t ramSegPer_size = 262144;     // 256 KiB per Segment in RAM
+const uint8_t opc_maxize = 0xff;
+const uint8_t opCombination_maxize = 8;
 const uint16_t screen_maxWidth = 1280;
+const uint16_t screen_minWidth = 640;
 const uint16_t screen_maxHeight = 960;
+const uint16_t screen_minHeight = 480;
+const uint16_t CLImode_BytesMaxSize = 2048;
 
 const uint8_t dead_magicNum = 0xcc;
+const uint8_t OCCT_size = 16;
+const uint8_t opCodeCombination_table[OCCT_size] = {0xff, 0xfe, 0xc7, 0xc6};
 uint8_t* opCode_decodeTable = new uint8_t[opc_maxize +1]();
+uint8_t* _FFopCodeCombination_decodeTable = new uint8_t[opCombination_maxize]();
+uint8_t* _FEopCodeCombination_decodeTable = new uint8_t[opCombination_maxize]();
 
 const uint32_t UKED_EntropyDev = 0xffe7c099;
 const uint32_t UKED_GraphicDev = 0xf6ca951c;
@@ -69,6 +84,7 @@ const uint32_t UKED_Center2OPtransferDev = 0x7ca5fc20;
 const uint32_t UKED_Center2centerTransferDev = 0x7ca5fc2c;
 const uint32_t UKED_VoiceCarDev = 0xc015cacd;
 const uint32_t UKED_SoundCarDev = 0xf50dcacd;
+const uint32_t UKED_DiskDev = 0xffffd15c;
 
 
 class Ram
@@ -76,10 +92,10 @@ class Ram
 private:
     uint32_t ram_size;
     uint32_t stackGeneral_endIndex, stackSegReg_endIndex, stackFLAGS_endIndex;
-    const static uint32_t ramSegs_size = ramSegPer_maxize;
+    const static uint32_t ramSegs_size = ramSegPer_size;
     const static uint32_t PID_maxize = 0xffff;
     const static uint16_t rootPID = 0x00, constPID = 0x01, publicPID = 0xffff;
-    const uint32_t ramSegs_maxcount = ram_size / ramSegs_size;
+    uint32_t ramSegs_maxcount;
     mutable uint32_t read_times = 0;
     mutable uint32_t write_times = 0;
     mutable bool deadState_temp = false;
@@ -89,7 +105,7 @@ private:
     // 0x00 is root PID, same means it s locked for other Processes tha cant visit;
     // 0x01 is const PID, same means every Process can visit tha ram segmentation locked by it but read only except root PID;
     // 0xffff is public PID, same means every Process can visit the ram segmentation locked by it;
-    mutable uint16_t* ramSgmtation_LocktPID = new uint16_t[ramSegs_maxcount]();
+    mutable uint16_t* ramSgmtation_LocktPID;
 
 public:
     std::mutex raMutexC;
@@ -97,9 +113,13 @@ public:
 
     Ram(uint32_t ramSizeT=ram_maxize)
      : ram_size(std::min(ram_maxize, std::max(ram_minSize, ramSizeT))), ramD(new uint8_t[ram_size +1]()),
+     ramSegs_maxcount(ram_size / ramSegs_size), ramSgmtation_LocktPID(new uint16_t[ramSegs_maxcount]),
       stackGeneral_endIndex(ram_size - stack_maxize),
        stackSegReg_endIndex(stackGeneral_endIndex - stack_maxize),
-        stackFLAGS_endIndex(stackSegReg_endIndex - stack_maxize) {}
+        stackFLAGS_endIndex(stackSegReg_endIndex - stack_maxize) 
+    {
+        memset(ramSgmtation_LocktPID, publicPID, ramSegs_maxcount);
+    }
 
     bool PIDcanRead(uint32_t index, uint16_t PID) const
     {
@@ -278,6 +298,9 @@ public:
 
 class reg32
 {
+private:
+    uint32_t _value;
+
 public:
     class HalfRef
     {
@@ -439,10 +462,247 @@ public:
         high() &= ~(0b01u << bit_index);
     }
 
+};
+
+class reg16
+{
 private:
-    uint32_t _value;
+    uint16_t _value;
+
+public:
+    class HalfRef
+    {
+    public:
+        HalfRef(uint16_t& whole, int shift) : _whole(whole), _shift(shift) {}
+        HalfRef(reg16& reg, int shift) : _whole(reg._value), _shift(shift) {}
+
+        operator uint8_t() const {return static_cast<uint8_t>((_whole >> _shift) & 0xff); }
+
+        bool ckbit(int bit_index) const
+        {
+            bit_index = std::min(7, std::max(0, bit_index));
+            return ((_whole >> _shift) & (0b01u << bit_index)) ==1;
+        }
+
+        HalfRef& operator=(uint8_t val)
+        {
+            uint16_t mask = 0xffu << _shift;
+            _whole = (_whole & ~mask) | ((uint16_t)val << _shift); 
+
+            return *this;
+        }
+        HalfRef& operator=(const HalfRef& otherHalfReg) 
+        {
+            uint16_t mask = 0xffu << _shift;
+            _whole = (_whole & ~mask) | (otherHalfReg._whole & mask); 
+
+            return *this;
+        }
+        HalfRef& operator^=(uint8_t mask)
+        {
+            uint16_t fullMask = (uint16_t)mask << _shift;
+            _whole ^= fullMask;
+            return *this;
+        }
+        HalfRef& operator|=(uint8_t mask)
+        {
+            uint16_t fullMask = (uint16_t)mask << _shift;
+            _whole |= fullMask;
+            return *this;
+        }
+        HalfRef& operator&=(uint8_t mask)
+        {
+            uint8_t current = static_cast<uint8_t>((_whole >> _shift) & 0xffu);
+            current &= mask;
+            *this = current; 
+            return *this;
+        }
+        HalfRef& operator+=(uint8_t val)
+        {
+            uint8_t current = static_cast<uint8_t>((_whole >> _shift) & 0xffu);
+            current += val;
+            *this = current; 
+            return *this;
+        }
+        HalfRef& operator-=(uint8_t val)
+        {
+            uint8_t current = static_cast<uint8_t>((_whole >> _shift) & 0xffu);
+            current -= val;
+            *this = current;
+            return *this;
+        }
+
+    private:
+        uint16_t& _whole;
+        int _shift;
+    
+    };
+
+    reg16(uint16_t init =0) : _value(init) {}
+
+    HalfRef low()   {return HalfRef(_value, 0); }
+    HalfRef high()  {return HalfRef(_value, 8); }
+
+    uint16_t word() const   {return _value; }
+    void word(uint16_t Val) {_value = Val; }
+
+    reg16& operator=(uint16_t Val) {_value = Val; return *this; }
+    operator uint16_t() const {return _value; }
+
+    void chbit(int bit_index)
+    {
+        bit_index = std::min(15, std::max(0, bit_index));
+        _value ^= (0b01u << bit_index);
+    }
+    bool ckbit(int bit_index) const
+    {
+        bit_index = std::min(15, std::max(0, bit_index));
+        return ((_value >> bit_index) & 0b01u) ==1;
+    }
+    void stbit(int bit_index) 
+    {
+        bit_index = std::min(15, std::max(0, bit_index));
+        _value |= (0b01u << bit_index);
+    }
+    void clbit(int bit_index) 
+    {
+        bit_index = std::min(15, std::max(0, bit_index));
+        _value &= ~(0b01u << bit_index);
+    }
+    bool isParity() const
+    {
+        uint8_t valueT = _value & 0xffu;
+        valueT ^= (valueT >> 4);
+        valueT ^= (valueT >> 2);
+        valueT ^= (valueT >> 1);
+        return (valueT & 0b01u) ==0;
+    }
+
+    // Low halfReg
+    void chbitL(int bit_index)      
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value ^= (0b01u << bit_index);
+    }
+    bool ckbitL(int bit_index) const
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        return ((_value >> bit_index) & 0b01u) ==1;
+    }
+    void stbitL(int bit_index) 
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value |= (0b01u << bit_index);
+    }
+    void clbitL(int bit_index)
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value &= ~(0b01u << bit_index);
+    }
+
+    // High halfReg
+    void chbitH(int bit_index)    
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value ^= (0b01u << (bit_index + 8));
+    }
+    bool ckbitH(int bit_index) const
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        return ((_value >> (bit_index + 8)) & 0b01u) ==1;
+    }
+    void stbitH(int bit_index) 
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value |= (0b01u << (bit_index + 8));
+    }
+    void clbitH(int bit_index)
+    {
+        bit_index = std::min(7, std::max(0, bit_index));
+        _value &= ~(0b01u << (bit_index + 8));
+    }
 
 };
+
+class regF32
+{
+private:
+    float _value;
+
+public:
+    regF32(float init =0) : _value(init) {}
+
+    regF32& operator=(float Val) {_value = Val; return *this; }
+    operator float() const {return _value; }
+    float word() const  {return _value; }
+    void word(float Val) {_value = Val; }
+
+};
+
+
+class Center16g
+{
+private:
+    class Core
+    { // ALU Core of GraphicDev
+    private:
+        //
+
+    public:
+        Core() {}
+
+        // if the src opr is reg, it degenerates into the data with same bits;
+        void add(reg32* dst, uint32_t src) {dst->word(dst->word() + src); }
+        void add(reg16* dst, uint16_t src) {dst->word(dst->word() + src); }
+        void sub(reg32* dst, uint32_t src) {dst->word(dst->word() - src); }
+        void sub(reg16* dst, uint16_t src) {dst->word(dst->word() - src); }
+        void andL(reg32* dst, uint32_t src) {dst->word(dst->word() & src); }
+        void andL(reg16* dst, uint16_t src) {dst->word(dst->word() & src); }
+        void orL(reg32* dst, uint32_t src) {dst->word(dst->word() | src); }
+        void orL(reg16* dst, uint16_t src) {dst->word(dst->word() | src); }
+        void xorL(reg32* dst, uint32_t src) {dst->word(dst->word() ^ src); }
+        void xorL(reg16* dst, uint16_t src) {dst->word(dst->word() ^ src); }
+        void mul(reg32* dst, uint16_t src) {dst->word(dst->low() * src); }
+        void mul(reg16* dst, uint8_t src) {dst->word(dst->low() * src); }
+        void mul(regF32* dst, float src) {dst->word(dst->word() * src); }
+        void div(reg32* dst, uint16_t src) {dst->low() = (uint16_t)(dst->word() / src); }
+        void div(reg16* dst, uint8_t src) {dst->low() = (uint8_t)(dst->word() / src); }
+        void div(regF32* dst, float src) {dst->word(dst->word() / src); }
+        void inc(reg32* dst) {dst->word(dst->word() + 1); }
+        void inc(reg16* dst) {dst->word(dst->word() + 1); }
+        void dec(reg32* dst) {dst->word(dst->word() - 1); }
+        void dec(reg16* dst) {dst->word(dst->word() - 1); }
+        void sin(regF32* dst, uint16_t src) {dst->word(sinf((float)src)); }
+        void sin(regF32* dst, float src) {dst->word(sinf(src)); }
+        void cos(regF32* dst, uint16_t src) {dst->word(cosf((float)src)); }
+        void cos(regF32* dst, float src) {dst->word(cosf(src)); }
+
+    };
+
+
+    uint8_t regs_count;
+    uint8_t Core_count;
+    uint8_t regFloat_count;
+
+    // use registers as cache
+    reg16* reg16sP;
+    reg32* reg32sP;
+    regF32* regF32sP;
+    Core* coresP;
+
+public:
+    Center16g(uint8_t regsCount, uint8_t CoreCount, uint8_t regFloatCount)
+        : regs_count(std::min(regsPer_Gcenter_maxize, std::max(regsCount, regsPer_Gcenter_minSize))),
+         Core_count(std::min(corePer_Gcenter_maxize, std::max(CoreCount, corePer_Gcenter_minSize))), 
+         regFloat_count(std::min(regsPer_Gcenter_maxize, std::max(regFloatCount, regsPer_Gcenter_minSize))),
+         reg16sP(new reg16[regs_count]), reg32sP(new reg32[regs_count]), regF32sP(new regF32[regFloat_count]),
+         coresP(new Core[Core_count])
+    { /*coresP[0].add(&reg16sP[0], reg16sP[1]);
+            example ^   without error message;;
+         */}
+
+};
+
 
 class Hasher
 {
@@ -457,13 +717,14 @@ private:
     const static uint32_t xor_seed = 0xdeadc01d;        
     const static uint32_t mul_seeDefault = 0xfcfbfaf9;
     const static uint32_t num1 = 0x9e3779b1;
+    const static uint32_t num2 = 0x85ebca6b;
 
     static bool tablesInited;
     static void ensure_tableInited(uint32_t seed_4mul = mul_seeDefault)
     {
         if (!tablesInited)
         {
-            create_randNumTable(seed_4mul);
+            //create_randNumTable(seed_4mul);
             create_randNumTableHR2(seed_4mul);
             tablesInited = true;
         }
@@ -483,18 +744,19 @@ public:
         num *= num1;
         for (int i =0; i < times; ++i)
         {
-            num ^= (num >> 16);
+            num ^= (num >> 16) | (num2 << 4);
             num *= numT;
-            numT ^= ((((numT >> 8) | ((num ^ num1) >> 24)) & (numT << 16)) | 0x01);
+            numT ^= (((numT >> 9) | ((num ^ num1) >> 21)) & (numT << 12));
+            numT |= 0x01;
         }
-        if (num == 0 || num == 0xffffffff) {return hash_uint32(num ^ (seed_4mul & numT), times ^ 0x0f, seed_4mul);}
+        if (num == 0 || num == 0xffffffff) {return hash_uint32(num ^ (seed_4mul & numT), times ^ 0b1011, seed_4mul);}
         return num;
     }
 
     static void create_randNumTable(uint32_t seed_4mul=mul_seeDefault)
     {
         int times = min4timesArg;
-        for (uint32_t index1 =0; times < max4timesArg; (++times, ++index1))
+        for (uint32_t index1 =0; times <= max4timesArg; (++times, ++index1))
         {
             for (uint32_t index2 =0; index2 < length_sizeof_uint16; ++index2)
             {
@@ -505,8 +767,9 @@ public:
 
     static void create_randNumTableHR2(uint32_t seed_4mul=mul_seeDefault)
     {
+        create_randNumTable();
         int times = min4timesArg;
-        for (uint32_t index1 =0; times < max4timesArg; (++times, ++index1))
+        for (uint32_t index1 =0; times <= max4timesArg; (++times, ++index1))
         {
             for (uint32_t index2 =0; index2 < length_sizeof_uint16; ++index2)
             {
@@ -527,9 +790,7 @@ public:
     static uint32_t get_randNumHR2(uint16_t index, int timesD=0)
     {
         timesD = std::min(max4timesArg -2, std::max(0, timesD));
-        uint16_t step = randNum_arrHR2[timesD][(uint16_t)(index +1)];
-        uint16_t indexT = index +1 + step;
-        return randNum_arrHR2[timesD][(uint16_t)indexT];
+        return randNum_arrHR2[timesD][(uint16_t)index];
     }
 
 };
@@ -543,15 +804,31 @@ class Screen
 private:
     uint16_t Width;
     uint16_t Height;
-    uint32_t* outBuffer;
-    uint32_t* pageBuffer;
+    uint16_t CLImod_maxBytes;
+    uint32_t* outBufferGUI;
+    uint32_t* pageBufferGUI;
+    uint32_t* outBufferCLI;
+    uint32_t* pageBufferCLI;
+    mutable bool isGUImod = false;
 
 public:
-    Screen(uint16_t width=screen_maxWidth, uint16_t height=screen_maxHeight)
-     : Width(width), Height(height), outBuffer(new uint32_t[width * height]()), pageBuffer(new uint32_t[width * height]()) {}
+    Screen(uint16_t width=screen_maxWidth, uint16_t height=screen_maxHeight, uint16_t CLImod_BytesMaxize=CLImode_BytesMaxSize)
+     : Width(std::min(screen_maxWidth, std::max(width, screen_minWidth))), Height(std::min(screen_maxHeight, std::max(height, screen_minHeight))),
+     outBufferGUI(new uint32_t[width * height]()), pageBufferGUI(new uint32_t[width * height]()), 
+     CLImod_maxBytes(CLImod_BytesMaxize), outBufferCLI(new uint32_t[CLImod_BytesMaxize]()), pageBufferCLI(new uint32_t[CLImod_BytesMaxize]()) {}
 
     uint16_t get_Width() const {return Width; }
     uint16_t get_Height() const {return Height; }
+    void _setGUImod() const {isGUImod = true; }
+    void _setCLImod() const {isGUImod = false; }
+
+    ~Screen()
+    {
+        delete[] outBufferGUI;
+        delete[] pageBufferGUI;
+        delete[] outBufferCLI;
+        delete[] pageBufferCLI;
+    }
 
 };
 
@@ -567,14 +844,17 @@ private:
     uint32_t UKUEUD;
     uint8_t* infoBuffer;
     uint8_t* outBuffer;
+    uint8_t infoBufferHeadPointer = 0;
+    uint8_t outBufferHeadPointer = 0;
     std::mutex infoMutexC;
     bool IOstate = false;
+    bool selfRunningState = false;
+    
+    uint8_t IOphase = 0;
 
 public:
     std::mutex devMutexC;
     uint8_t* buffer;
-    uint8_t infoBufferHeadPointer = 0;
-    uint8_t outBufferHeadPointer = 0;
 
 
 
@@ -585,25 +865,136 @@ public:
     uint32_t get_UEID() const {return UEID; }
     uint32_t get_UKED() const {return UKUEUD; }
 
+    bool get_selfRunningState() const {return selfRunningState; }
+    void start() {selfRunningState = true; }
+    void stop() {selfRunningState = false; }
     void startIO() {IOstate = true; }
     void stopIO() {IOstate = false; }
+
+    bool _infoBHPcheck(uint8_t lengthNeed=1)
+    {
+        lengthNeed = std::min((uint8_t)(info2devIObuffer_maxize -1), lengthNeed);
+        if (infoBufferHeadPointer >= info2devIObuffer_maxize) 
+        {
+            infoBufferHeadPointer = info2devIObuffer_maxize -1 - lengthNeed; 
+            return true;
+        }
+        else if ((int)infoBufferHeadPointer - (int)lengthNeed < 0)
+        {
+            infoBufferHeadPointer = 0;
+            return true;
+        }
+        return false;
+    }
+    bool _outBHPcheck(uint8_t lengthNeed=1)
+    {
+        lengthNeed = std::min((uint8_t)(info2devIObuffer_maxize -1), lengthNeed);
+        if (outBufferHeadPointer >= info2devIObuffer_maxize) 
+        {
+            outBufferHeadPointer = info2devIObuffer_maxize -1 - lengthNeed; 
+            return true;
+        }
+        else if ((int)outBufferHeadPointer - (int)lengthNeed < 0)
+        {
+            outBufferHeadPointer = 0;
+            return true;
+        }
+        return false;
+    }
 
     void info2dev(uint8_t data)
     {
         std::unique_lock<std::mutex> infoLock(infoMutexC);
-        infoBufferHeadPointer = std::min(infoBufferHeadPointer, info2devIObuffer_maxize);
+        _infoBHPcheck(1);
         infoBuffer[infoBufferHeadPointer] = data;
         infoBufferHeadPointer++;
     }
-    uint8_t info2center()
+    void info2dev(uint16_t data)
     {
-        std::unique_lock<std::mutex> outLock(devMutexC);
-        outBufferHeadPointer = std::min(outBufferHeadPointer, info2devIObuffer_maxize);
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _infoBHPcheck(2);
+        infoBuffer[infoBufferHeadPointer] = (uint8_t)data;
+        infoBuffer[infoBufferHeadPointer +1] = (uint8_t)(data >> 8);
+        infoBufferHeadPointer += 2;
+    }
+    void info2dev(uint32_t data)
+    {
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _infoBHPcheck(4);
+        infoBuffer[infoBufferHeadPointer] = (uint8_t)data;
+        infoBuffer[infoBufferHeadPointer +1] = (uint8_t)(data >> 8);
+        infoBuffer[infoBufferHeadPointer +2] = (uint8_t)(data >> 16);
+        infoBuffer[infoBufferHeadPointer +3] = (uint8_t)(data >> 24);
+        infoBufferHeadPointer += 4;
+    }
+    uint8_t info2center8()
+    {
+        uint8_t res;
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(1);
+        res = outBuffer[outBufferHeadPointer];
         outBufferHeadPointer--;
-        return outBuffer[outBufferHeadPointer +1];
+        return res;
+    }
+    uint16_t info2center16()
+    {
+        uint16_t res;
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(2);
+        res = (uint16_t)outBuffer[outBufferHeadPointer] | (uint16_t)(outBuffer[outBufferHeadPointer +1] << 8);
+        outBufferHeadPointer -= 2;
+        return res;
+    }
+    uint32_t info2center32()
+    {
+        uint32_t res;
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(4);
+        res = (uint32_t)outBuffer[outBufferHeadPointer] | (uint32_t)(outBuffer[outBufferHeadPointer +1] << 8) |
+            (uint32_t)(outBuffer[outBufferHeadPointer +2] << 16) | (uint32_t)(outBuffer[outBufferHeadPointer +3] << 24);
+        outBufferHeadPointer -= 4;
+        return res;
     }
     void _savInfo() {memcpy(buffer, infoBuffer, info2devIObuffer_maxize); }
-    
+    void _infoBHPset0() {infoBufferHeadPointer = 0; }
+    void _outBHPset0() {outBufferHeadPointer = 0; }
+    void _push2outBuffer(uint8_t data)
+    {
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(1);
+        outBuffer[outBufferHeadPointer] = data;
+        outBufferHeadPointer++;
+    }
+    void _push2outBuffer(uint16_t data)
+    {
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(2);
+        outBuffer[outBufferHeadPointer] = (uint8_t)data;
+        outBuffer[outBufferHeadPointer +1] = (uint8_t)(data >> 8);
+        outBufferHeadPointer += 2;
+    }
+    void _push2outBuffer(uint32_t data)
+    {
+        std::unique_lock<std::mutex> infoLock(infoMutexC);
+        _outBHPcheck(4);
+        outBuffer[outBufferHeadPointer] = (uint8_t)data;
+        outBuffer[outBufferHeadPointer +1] = (uint8_t)(data >> 8);
+        outBuffer[outBufferHeadPointer +2] = (uint8_t)(data >> 16);
+        outBuffer[outBufferHeadPointer +3] = (uint8_t)(data >> 24);
+        outBufferHeadPointer += 4;
+    }
+    void _phaseInc() {IOphase++; }
+    void _phaseDec() {IOphase--; }
+    void _phaseClr() {IOphase = 0; }
+    uint8_t get_IOphase() const {return IOphase; }
+
+    ~devIO()
+    {
+        delete[] infoBuffer;
+        delete[] outBuffer;
+        delete[] buffer;
+    }
+
 };
 
 class EntropyDev : public devIO
@@ -620,12 +1011,48 @@ public:
 class GraphicDev : public devIO
 {
 private:
-    uint8_t GramD[gram_maxize] = {0};
+    uint32_t gram_size;
+    uint8_t graphCenters_count;
+    uint8_t* GramD;
     Screen* screenP;
+    Center16g* gCentersP;
 
 public:
-    GraphicDev(uint32_t ID, Hasher* hashG, Screen* screenG=nullptr)
-     : devIO(hashG->get_randNumHR2(ID), UKED_GraphicDev), screenP(screenG) {}
+    GraphicDev(uint32_t ID, uint32_t gramSize, uint8_t graphCentersCount, uint8_t regsCount, uint8_t CoreCount, uint8_t regFsCount, Screen* screenG=nullptr)
+     : devIO(get_randNumHR2(ID), UKED_GraphicDev), screenP(screenG), gram_size(gramSize),
+      graphCenters_count(graphCentersCount),
+      GramD(new uint8_t[gram_size])
+    {
+        void* temp = operator new (graphCenters_count * sizeof(Center16g));
+        gCentersP = static_cast<Center16g*>(temp);
+        for (uint8_t index =0; index < graphCenters_count; ++index)
+        {
+            new (&gCentersP[index]) Center16g(regsCount, CoreCount, regFsCount);
+        }
+    }
+
+    void handle()
+    {}
+
+    void loop()
+    {
+        while (get_selfRunningState())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(32));
+        }
+    }
+
+
+    ~GraphicDev()
+    {
+        delete screenP;
+        delete[] GramD;
+        for (uint8_t index =0; index < graphCenters_count; ++index)
+        {
+            gCentersP[index].~Center16g();
+        }
+        delete[] gCentersP;
+    }
 
 };
 
@@ -638,8 +1065,8 @@ private:
     int sfont_id = -1;
 
 public:
-    VoiceCarDev(uint32_t ID, Hasher* hashG, std::string SFpath)
-     : devIO(hashG->get_randNumHR2(ID), UKED_VoiceCarDev), SFpathP(SFpath) 
+    VoiceCarDev(uint32_t ID, std::string SFpath)
+     : devIO(get_randNumHR2(ID), UKED_VoiceCarDev), SFpathP(SFpath) 
     {
         settings = new_fluid_settings(); // init the settings
         fluid_settings_setnum(settings, "synth.sample-rate", 44100.0); // set the sampling rate
@@ -690,8 +1117,21 @@ private:
     uint32_t Volume;
 
 public:
-    SoundCarDev(uint32_t ID, Hasher* hashG)
-     : devIO(hashG->get_randNumHR2(ID), UKED_SoundCarDev) {}
+    SoundCarDev(uint32_t ID)
+     : devIO(get_randNumHR2(ID), UKED_SoundCarDev) {}
+
+};
+
+class DiskDev : public devIO
+{
+private:
+    std::string DiskPath;
+    std::string DiskJson;
+
+public:
+    DiskDev(uint32_t ID, std::string DiskPathN, std::string DiskJsonN)
+     : devIO(get_randNumHR2(ID), UKED_DiskDev), DiskPath(DiskPathN), DiskJson(DiskJsonN) {}
+
 
 };
 
@@ -706,8 +1146,13 @@ private:
         reg32* flag;
         reg32* ACC;     // AX
         reg32* DRC;     // DX
+        reg32* SP, *BP, *FP;
+        uint16_t* PID;
         uint32_t* timE;
         Ram* ramP;
+
+        uint32_t* stackG_endIndex, *stackS_endIndex, *stackF_endIndex;
+        uint32_t* stackG_headIndex, *stackS_headIndex, *stackF_headIndex;
 
 
         // for temporary use
@@ -715,8 +1160,11 @@ private:
         uint16_t copyF1, copyF2, copyF3, copyF4;
 
     public:
-        commandProcesser(reg32* flagN, reg32* AX, reg32* DX, uint32_t* timEN, Ram* ramG)
-         : flag(flagN), ACC(AX), DRC(DX), timE(timEN), ramP(ramG) {}
+        commandProcesser(reg32* flagN, reg32* AX, reg32* DX, uint32_t* timEN, Ram* ramG, reg32* SPN, reg32* BPN, reg32* FPN, uint16_t* PIDN,
+            uint32_t* stackG_end, uint32_t* stackS_end, uint32_t* stackF_end, uint32_t* stackG_head, uint32_t* stackS_head, uint32_t* stackF_head)
+         : flag(flagN), ACC(AX), DRC(DX), timE(timEN), ramP(ramG), SP(SPN), BP(BPN), FP(FPN), PID(PIDN), 
+            stackG_endIndex(stackG_end), stackS_endIndex(stackS_end), stackF_endIndex(stackF_end), 
+            stackG_headIndex(stackG_head), stackS_headIndex(stackS_head), stackF_headIndex(stackF_head) {}
 
         void nop(uint8_t time_unitMS) const
         {
@@ -781,6 +1229,83 @@ private:
         {
             bool SignAX = ACC->ckbit(31);       // check the sign of AX
             if (SignAX) {DRC->word(0xffffffff); } else {DRC->word(0); }
+        }
+        void handle_after_ramStackProcess()
+        {
+            bool isDead = ramP->get_deadState();
+            bool isUA = ramP->get_UAstate(*PID);
+            bool isSOF = !(*stackG_endIndex < SP->word() && SP->word() <= *stackG_headIndex) ||
+                        !(*stackS_endIndex < BP->word() && BP->word() <= *stackS_headIndex) ||
+                        !(*stackF_endIndex < FP->word() && FP->word() <= *stackF_headIndex);
+            if (isUA)
+            {
+                // Unauthorized Access
+                flag->stbit(30);
+            }
+            if (isDead)
+            {
+                // Memory Overflow
+                flag->stbit(31);
+            }
+            if (isSOF)
+            {
+                // Stack Overflow
+                flag->stbit(29);
+            }
+        }
+        void push(reg32 src)
+        {
+            SP -= 4;
+            ramP->write32(SP->word(), src.word(), *PID);
+            handle_after_ramStackProcess();
+        }
+        void push(uint32_t imm32)
+        {
+            SP -= 4;
+            ramP->write32(SP->word(), imm32, *PID);
+            handle_after_ramStackProcess();
+        }
+        void push(reg32::HalfRef src)
+        {
+            SP -= 4;
+            ramP->write32(SP->word(), (uint32_t)src, *PID);
+            handle_after_ramStackProcess();
+        }
+        void pushSeg(reg32 src)
+        {
+            BP -= 4;
+            ramP->write32(BP->word(), src.word(), *PID);
+            handle_after_ramStackProcess();
+        }
+        void pushF()
+        {
+            FP -= 4;
+            ramP->write32(FP->word(), flag->word(), *PID);
+            handle_after_ramStackProcess();
+        }
+        void pop(reg32* dst)
+        {
+            dst->word(ramP->read32(SP->word(), *PID));
+            handle_after_ramStackProcess();
+            SP += 4;
+        }
+        void pop(reg32::HalfRef* dst)
+        {
+            *dst = ramP->read16(SP->word(), *PID);
+            handle_after_ramStackProcess();
+            SP += 4;
+        }
+        void popSeg(reg32* dst)
+        {
+            dst->word(ramP->read32(BP->word(), *PID));
+            handle_after_ramStackProcess();
+            BP += 4;
+        }
+        void popF()
+        {
+            flag->word(ramP->read32(FP->word(), *PID));
+            handle_after_ramStackProcess();
+            FP += 4;
         }
         void flagSet4add(bool sum_betterThan_dst, bool dstParity, bool dstEZ, bool dstMSB, bool OFcheck)
         {
@@ -1562,21 +2087,42 @@ private:
     {
     private:
         commandProcesser* cmdPcsr;
+        IOmanager* IOMP;
         uint16_t* PID;
         reg32* regs;
         reg32* segs;
         uint32_t* timE;
         Ram* ramP;
+        uint8_t* SDI;
 
         reg32::HalfRef halfRegs[8];
 
         uint32_t *stackG_end, *stackS_end, *stackF_end;
         uint32_t *stackG_head, *stackS_head, *stackF_head;
 
+        
+        bool postProcessing_afterRamRW()
+        {
+            bool isDead = ramP->get_deadState();
+            bool isUA = ramP->get_UAstate(*PID);
+            if (isUA)
+            {
+                // Unauthorized Access
+                regs[8].stbit(30);
+            }
+            if (isDead)
+            {
+                // Memory Overflow
+                regs[8].stbit(31);
+            }
+            return isDead || isUA;
+        }
+
+
     public:
-        commandDecoder(commandProcesser* cmds, reg32* regsN, reg32* segsN, uint32_t* timEN, Ram* ramG, uint16_t* PIDN, 
+        commandDecoder(commandProcesser* cmds, reg32* regsN, reg32* segsN, uint32_t* timEN, Ram* ramG, uint16_t* PIDN, uint8_t* SDIt, IOmanager* IOG, 
             uint32_t* stackG_endN, uint32_t* stackS_endN, uint32_t* stackF_endN, uint32_t* stackG_headN, uint32_t* stackS_headN, uint32_t* stackF_headN)
-         : cmdPcsr(cmds), regs(regsN), segs(segsN), timE(timEN), ramP(ramG), PID(PIDN), halfRegs{
+         : cmdPcsr(cmds), regs(regsN), segs(segsN), timE(timEN), ramP(ramG), PID(PIDN), SDI(SDIt), IOMP(IOG), halfRegs{
             reg32::HalfRef(regsN[0], 0), reg32::HalfRef(regsN[1], 0), reg32::HalfRef(regsN[2], 0), reg32::HalfRef(regsN[3], 0),
             reg32::HalfRef(regsN[0], 16), reg32::HalfRef(regsN[1], 16), reg32::HalfRef(regsN[2], 16), reg32::HalfRef(regsN[3], 16)
          }, stackG_end(stackG_endN), stackS_end(stackS_endN), stackF_end(stackF_endN),
@@ -1600,35 +2146,12 @@ private:
 
         */
 
-        bool postProcessing_afterRamRW()
-        {
-            bool isDead = ramP->get_deadState();
-            bool isDead2;
-            bool isUA = ramP->get_UAstate(*PID);
-            if (isUA)
-            {
-                // Unauthorized Access
-                regs[8].stbit(30);
-            }
-            if (isDead)
-            {
-                isDead2 = ramP->get_deadState();
-                if (isDead2)
-                {
-                    // Memory Overflow
-                    regs[8].stbit(31);
-                } else 
-                {return true; }
-            }
-            return isDead || isUA;
-        }
-
         void decode(uint8_t* commands)
         {
             uint8_t opcode = commands[0];
             std::unique_lock<std::mutex> ram_lock(ramP->raMutexC);
 
-            switch (opcode)
+            switch (opcode) // Non-combination opcodes
             {
                 default:
                 {
@@ -1673,7 +2196,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x01: // add r/m32/16 m/r32/16, Bytes 7, [add, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -1685,7 +2208,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // add r32/16 m32/16
@@ -1727,7 +2250,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
                 
                 case 0x02: // add m32/16 r32/16, Bytes 3, [add, ModR/M, s32]
@@ -1738,7 +2261,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // add mem32 r32/16
@@ -1770,7 +2293,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x03: // add r32/16 m32/16, Bytes 3, [add, ModR/M, s32]
@@ -1781,7 +2304,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // add r32/16 mem32
@@ -1807,7 +2330,7 @@ private:
                         else {cmdPcsr->add(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
                 
                 case 0x04: // add AL imm16, Bytes 3, [add, immL, immH]
@@ -1815,7 +2338,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->add(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
                 
                 case 0x05: // add AX imm32, Bytes 5, [add, immLL, immLH, immHL, immHH]
@@ -1824,7 +2347,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->add(&regs[0], imm);
 
-                    break;
+                    return;
                 }
             
                 case 0x08: // or reg reg, Bytes 2, [or, src(4)|dst(4)]
@@ -1865,7 +2388,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x09: // or r/m32/16 m/r32/16, Bytes 7, [or, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -1877,7 +2400,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // or r32/16 m32/16
@@ -1919,7 +2442,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x0a: // or m32/16 r32/16, Bytes 3, [or, ModR/M, s32]
@@ -1930,7 +2453,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // or mem32 r32/16
@@ -1962,7 +2485,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x0b: // or r32/16 m32/16, Bytes 3, [or, ModR/M, s32]
@@ -1973,7 +2496,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // or r32/16 mem32
@@ -1999,7 +2522,7 @@ private:
                         else {cmdPcsr->orL(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x0c: // or AL imm16, Bytes 3, [or, immL, immH]
@@ -2007,7 +2530,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->orL(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x0d: // or AX imm32, Bytes 5, [or, immLL, immLH, immHL, immHH]
@@ -2016,7 +2539,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->orL(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x10: // adc reg reg, Bytes 2, [adc, src(4)|dst(4)]
@@ -2057,7 +2580,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x11: // adc r/m32/16 m/r32/16, Bytes 7, [adc, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -2069,7 +2592,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // adc r32/16 m32/16
@@ -2111,7 +2634,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x12: // adc m32/16 r32/16, Bytes 3, [adc, ModR/M, s32]
@@ -2122,7 +2645,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // adc mem32 r32/16
@@ -2154,7 +2677,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x13: // adc r32/16 m32/16, Bytes 3, [adc, ModR/M, s32]
@@ -2165,7 +2688,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // adc r32/16 mem32
@@ -2191,7 +2714,7 @@ private:
                         else {cmdPcsr->adc(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x14: // adc AL imm16, Bytes 3, [adc, immL, immH]
@@ -2199,7 +2722,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->adc(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x15: // adc AX imm32, Bytes 5, [adc, immLL, immLH, immHL, immHH]
@@ -2208,7 +2731,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->adc(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x18: // sbb reg reg, Bytes 2, [sbb, src(4)|dst(4)]
@@ -2249,7 +2772,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x19: // sbb r/m32/16 m/r32/16, Bytes 7, [adc, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -2261,7 +2784,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // sbb r32/16 m32/16
@@ -2303,7 +2826,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x1a: // sbb m32/16, r32/16, Bytes 3, [sbb, ModR/M, s32]
@@ -2314,7 +2837,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // sbb mem32 r32/16
@@ -2346,7 +2869,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x1b: // sbb r32/16, m32/16, Bytes 3, [sbb, ModR/M, s32]
@@ -2357,7 +2880,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // sbb r32/16 mem32
@@ -2383,7 +2906,7 @@ private:
                         else {cmdPcsr->sbb(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x1c: // sbb AL imm16, Bytes 3, [sbb, immL, immH]
@@ -2391,7 +2914,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->sbb(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x1d: // sbb AX imm32, Bytes 5, [sbb, immLL, immLH, immHL, immHH]
@@ -2400,7 +2923,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->sbb(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x20: // and reg reg, Bytes 2, [and, src(4)|dst(4)]
@@ -2441,7 +2964,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x21: // and r/m32/16 m/r32/16, Bytes 7, [add, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -2453,7 +2976,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // and r32/16 m32/16
@@ -2495,7 +3018,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x22: // and m32/16 r32/16, Bytes 3, [and, ModR/M, s32]
@@ -2506,7 +3029,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // and mem32 r32/16
@@ -2538,7 +3061,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x23: // and r32/16 m32/16, Bytes 3, [and, ModR/M, s32]
@@ -2549,7 +3072,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // and r32/16 mem32
@@ -2575,7 +3098,7 @@ private:
                         else {cmdPcsr->andL(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x24: // and AL imm16, Bytes 3, [and, immL, immH]
@@ -2583,7 +3106,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->andL(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x25: // and AX imm32, Bytes 5, [and, immLL, immLH, immHL, immHH]
@@ -2592,7 +3115,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->andL(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x28: // sub reg reg, Bytes 2, [sub, src(4)|dst(4)]
@@ -2633,7 +3156,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x29: // sub r/m32/16 m/r32/16, Bytes 7, [sub, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -2645,7 +3168,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // sub r32/16 m32/16
@@ -2687,7 +3210,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x2a: // sub m32/16, r32/16, Bytes 3, [sub, ModR/M, s32]
@@ -2698,7 +3221,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // sub mem32 r32/16
@@ -2730,7 +3253,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x2b: // sub r32/16, m32/16, Bytes 3, [sub, ModR/M, s32]
@@ -2741,7 +3264,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // sub r32/16 mem32
@@ -2767,7 +3290,7 @@ private:
                         else {cmdPcsr->sub(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x2c: // sub AL imm16, Bytes 3, [sub, immL, immH]
@@ -2775,7 +3298,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->sub(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x2d: // sub AX imm32, Bytes 5, [sub, immLL, immLH, immHL, immHH]
@@ -2784,7 +3307,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->sub(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x30: // xor reg reg, Bytes 2, [xor, src(4)|dst(4)]
@@ -2825,7 +3348,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x31: // xor r/m32/16 m/r32/16, Bytes 7, [xor, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -2837,7 +3360,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // xor r32/16 m32/16
@@ -2879,7 +3402,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x32: // xor m32/16 r32/16, Bytes 3, [xor, ModR/M, s32]
@@ -2890,7 +3413,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // xor mem32 r32/16
@@ -2922,7 +3445,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x33: // xor r32/16 m32/16, Bytes 3, [xor, ModR/M, s32]
@@ -2933,7 +3456,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // xor r32/16 mem32
@@ -2959,7 +3482,7 @@ private:
                         else {cmdPcsr->xorL(&regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x34: // xor AL imm16, Bytes 3, [xor, immL, immH]
@@ -2967,7 +3490,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->xorL(&halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x35: // xor AX imm32, Bytes 5, [xor, immLL, immLH, immHL, immHH]
@@ -2976,7 +3499,7 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->xorL(&regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x38: // cmp reg reg, Bytes 2, [cmp, src(4)|dst(4)]
@@ -3017,7 +3540,7 @@ private:
                         }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x39: // cmp r/m32/16 m/r32/16, Bytes 7, [cmp, modRWR(1)|mod32/16(1)|(2)|reg(4), s32, addrLL, addrLH, addrHL, addrHH]
@@ -3029,7 +3552,7 @@ private:
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
                     uint32_t memAddr = ((uint32_t)commands[3] | ((uint32_t)commands[4] << 8) 
-                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_maxize;
+                        | ((uint32_t)commands[5] << 16) | ((uint32_t)commands[6] << 24)) + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode_RM_MR == 0b0) // cmp r32/16 m32/16
@@ -3069,7 +3592,7 @@ private:
                         }
                     }
                     
-                    break;
+                    return;
                 }
 
                 case 0x3a: // cmp m32/16 r32/16, Bytes 3, [cmp, ModR/M, s32]
@@ -3080,7 +3603,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;
 
                     if (mode == 0b0) // cmp mem32 r32/16
@@ -3108,7 +3631,7 @@ private:
 
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x3b: // cmp r32/16 m32/16, Bytes 3, [cmp, ModR/M, s32]
@@ -3119,7 +3642,7 @@ private:
                     uint8_t segIndex = commands[2] & 0b111;
                     bool isHalf = (commands[1] & 0b1000) != 0;
 
-                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_maxize;
+                    uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     uint32_t memVal = 0;
 
                     if (mode == 0b0) // cmp r32/16 mem32
@@ -3145,7 +3668,7 @@ private:
                         else {cmdPcsr->cmp(regs[dstRegIndex], memVal); }
                     }
 
-                    break;
+                    return;
                 }
 
                 case 0x3c: // cmp AL imm16, Bytes 3, [cmp, immL, immH]
@@ -3153,7 +3676,7 @@ private:
                     uint16_t imm = ((uint16_t)commands[1] | ((uint16_t)commands[2] << 8));
                     cmdPcsr->cmp(halfRegs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x3d: // cmp AX imm32, Bytes 5, [cmp, immLL, immLH, immHL, immHH]
@@ -3162,61 +3685,288 @@ private:
                         | ((uint32_t)commands[3] << 16) | ((uint32_t)commands[4] << 24));
                     cmdPcsr->cmp(regs[0], imm);
 
-                    break;
+                    return;
                 }
 
                 case 0x40: // inc AX, Bytes 1, [inc/0]
                 {
                     cmdPcsr->inc(&regs[0]);
-                    break;
+                    return;
                 }
 
                 case 0x41: // inc CX, Bytes 1, [inc/1]
                 {
                     cmdPcsr->inc(&regs[1]);
-                    break;
+                    return;
                 }
 
                 case 0x42: // inc DX, Bytes 1, [inc/2]
                 {
                     cmdPcsr->inc(&regs[2]);
-                    break;
+                    return;
                 }
 
                 case 0x43: // inc BX, Bytes 1, [inc/3]
                 {
                     cmdPcsr->inc(&regs[3]);
-                    break;
+                    return;
                 }
 
                 case 0x44: // inc SP, Bytes 1, [inc/4]
                 {
                     cmdPcsr->inc(&regs[4]);
-                    break;
+                    return;
                 }
 
                 case 0x45: // inc BP, Bytes 1, [inc/5]
                 {
                     cmdPcsr->inc(&regs[5]);
-                    break;
+                    return;
                 }
 
                 case 0x46: // inc SI, Bytes 1, [inc/6]
                 {
                     cmdPcsr->inc(&regs[6]);
-                    break;
+                    return;
                 }
 
                 case 0x47: // inc DI, Bytes 1, [inc/7]
                 {
                     cmdPcsr->inc(&regs[7]);
-                    break;
+                    return;
                 }
 
-                case 0x48:
-                {}
+                case 0x48: // dec AX, Bytes 1, [dec/0]
+                {
+                    cmdPcsr->dec(&regs[0]);
+                    return;
+                }
+
+                case 0x49: // dec CX, Bytes 1, [dec/1]
+                {
+                    cmdPcsr->dec(&regs[1]);
+                    return;
+                }
+
+                case 0x4a: // dec DX, Bytes 1, [dec/2]
+                {
+                    cmdPcsr->dec(&regs[2]);
+                    return;
+                }
+
+                case 0x4b: // dec BX, Bytes 1, [dec/3]
+                {
+                    cmdPcsr->dec(&regs[3]);
+                    return;
+                }
+
+                case 0x4c: // dec SP, Bytes 1, [dec/4]
+                {
+                    cmdPcsr->dec(&regs[4]);
+                    return;
+                }
+
+                case 0x4d: // dec BP, Bytes 1, [dec/5]
+                {
+                    cmdPcsr->dec(&regs[5]); 
+                    return;
+                }
+
+                case 0x4e: // dec SI, Bytes 1, [dec/6]
+                {
+                    cmdPcsr->dec(&regs[6]); 
+                    return;
+                }
+
+                case 0x4f: // dec DI, Bytes 1, [dec/7]
+                {
+                    cmdPcsr->dec(&regs[7]); 
+                    return;
+                }
+
+                case 0x50: // push AX, Bytes 1, [push/0]
+                {
+                    cmdPcsr->push(regs[0]);
+                    return; 
+                }
+
+                case 0x51: // push CX, Bytes 1, [push/1]
+                {
+                    cmdPcsr->push(regs[1]);
+                    return;
+                }
+
+                case 0x52: // push DX, Bytes 1, [push/2]
+                {
+                    cmdPcsr->push(regs[2]);
+                    return;
+                }
+
+                case 0x53: // push BX, Bytes 1, [push/3]
+                {
+                    cmdPcsr->push(regs[3]);
+                    return;
+                }
+
+                case 0x54: // push SP, Bytes 1, [push/4]
+                {
+                    cmdPcsr->push(regs[4]);
+                    return;
+                }
+
+                case 0x55: // push BP, Bytes 1, [push/5]
+                {
+                    cmdPcsr->push(regs[5]);
+                    return;
+                }
+
+                case 0x56: // push SI, Bytes 1, [push/6]
+                {
+                    cmdPcsr->push(regs[6]);
+                    return;
+                }
+
+                case 0x57: // push DI, Bytes 1, [push/7]
+                {
+                    cmdPcsr->push(regs[7]);
+                    return;
+                }
+
+                case 0x58: // pop AX, Bytes 1, [pop/0]
+                {
+                    cmdPcsr->pop(&regs[0]);
+                    return;
+                }
+
+                case 0x59: // pop CX, Bytes 1, [pop/1]
+                {
+                    cmdPcsr->pop(&regs[1]);
+                    return;
+                }
+
+                case 0x5A: // pop DX, Bytes 1, [pop/2]
+                {
+                    cmdPcsr->pop(&regs[2]);
+                    return;
+                }
+
+                case 0x5B: // pop BX, Bytes 1, [pop/3]
+                {
+                    cmdPcsr->pop(&regs[3]);
+                    return;
+                }
+
+                case 0x5C: // pop SP, Bytes 1, [pop/4]
+                {
+                    cmdPcsr->pop(&regs[4]);
+                    return;
+                }
+
+                case 0x5D: // pop BP, Bytes 1, [pop/5]
+                {
+                    cmdPcsr->pop(&regs[5]);
+                    return;
+                }
+
+                case 0x5E: // pop SI, Bytes 1, [pop/6]
+                {
+                    cmdPcsr->pop(&regs[6]);
+                    return;
+                }
+
+                case 0x5F: // pop DI, Bytes 1, [pop/7]
+                {
+                    cmdPcsr->pop(&regs[7]);
+                    return;
+                }
 
             }
+        
+            // Combination opcodes
+            if (opcode == 0xff)
+            {
+                switch (*SDI)
+                {
+                    case 0: // inc r/m32/16, Bytes 4, [inc, SDI(3)|modR/M(1)|mod32/16(1)|reg(3), s32(wasted in R-mod), imm8(wasted in R-mod)]
+                    {
+                        bool mod_R = (commands[1] & 0b10000) != 0;
+                        bool isHalf = (commands[1] & 0b1000) != 0;
+                        uint8_t dstIndex = commands[1] & 0b111;
+
+                        if (mod_R) // inc r32/16
+                        {
+                            if (isHalf) // inc r16
+                            {
+                                cmdPcsr->inc(&halfRegs[dstIndex]);
+                                return;
+                            }
+                            else // inc r32
+                            {
+                                cmdPcsr->inc(&regs[dstIndex]);
+                                return;
+                            }
+                        }
+                        else // inc s32:[r32 + imm8]
+                        {
+                            int segIndex = commands[2] & 0b0111;
+                            uint32_t segVal = segs[segIndex].word();
+                            uint8_t imm8 = commands[3];
+                            uint32_t memAddr = regs[dstIndex].word() + imm8 + segVal * ramSegPer_size;
+                            reg32 memVal;
+
+                            if (isHalf) // inc 16b s32:[r32 + imm8]
+                            {
+                                memVal.low() = ramP->read16(memAddr, *PID);
+                                if (postProcessing_afterRamRW()) {return; }
+                                reg32::HalfRef memValHalf = memVal.low();
+
+                                cmdPcsr->inc(&memValHalf);
+                                ramP->write16(memAddr, memVal.low(), *PID);
+                            }
+                            else // inc s32:[r32 + imm8]
+                            {
+                                memVal.word(ramP->read32(memAddr, *PID));
+                                if (postProcessing_afterRamRW()) {return; }
+
+                                cmdPcsr->inc(&memVal);
+                                ramP->write32(memAddr, memVal.word(), *PID);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            else if (opcode == 0xfe)
+            {
+                switch (*SDI)
+                {
+                    case 0: // inc m32/16, Bytes 6, [inc, SDI(3)|mod32/16(1)|s32(4), addrLL, addrLH, addrHL, addrHH]
+                    {
+                        bool isHalf = (commands[1] & 0b10000) != 0;
+                        int segIndex = commands[1] & 0b0111;
+                        uint32_t segVal = segs[segIndex].word();
+                        uint32_t memAddr = (uint32_t)commands[2] | ((uint32_t)commands[3] << 8) |
+                             ((uint32_t)commands[4] << 16) | ((uint32_t)commands[5] << 24) + segVal * ramSegPer_size;
+
+                        reg32 memVal = ramP->read32(memAddr, *PID);
+                        if (postProcessing_afterRamRW()) {return; }
+
+                        if (isHalf) // inc 16b [memAddr]
+                        {
+                            reg32::HalfRef memValHalf = memVal.low();
+                            cmdPcsr->inc(&memValHalf);
+                            ramP->write16(memAddr, memVal.low(), *PID);
+                        }
+                        else // inc [memAddr]
+                        {
+                            cmdPcsr->inc(&memVal);
+                            ramP->write32(memAddr, memVal.word(), *PID);
+                        }
+                        return;
+                    }
+                }
+            }
+
         }
     
     };
@@ -3231,41 +3981,11 @@ private:
         reg32* regs;
         reg32* CS = &segs[0];
         Ram* ramP;
+        uint8_t* SDI;
         uint8_t commands[commandsArr_maxize] = {0};
         uint8_t commandsBuffer[commandsArr_maxize] = {0};
 
-    public:
-        commandAddressing(reg32* IPt, reg32* segsT, reg32* regsT, Ram* ramG, commandDecoder* cmDcdrG, uint16_t* PIDt)
-         : IP(IPt), segs(segsT), regs(regsT), ramP(ramG), cmDcdr(cmDcdrG), PID(PIDt) {}
-
-        bool postProcessing_afterRamRW()
-        {
-            bool isDead = ramP->get_deadState();
-            bool isDead2;
-            bool isUA = ramP->get_UAstate(*PID);
-            if (isUA)
-            {
-                // Unauthorized Access
-                regs[8].stbit(30);
-            }
-            if (isDead)
-            {
-                isDead2 = ramP->get_deadState();
-                if (isDead2)
-                {
-                    // Memory Overflow
-                    regs[8].stbit(31);
-                } else 
-                {return true; }
-            }
-            return isDead || isUA;
-        }
-
-        void ___readRam(uint32_t addr, uint8_t* buffer)
-        {
-            *buffer = ramP->read(addr, *PID);
-        }
-
+        
         void mov_buffer() 
         {
             for (uint8_t index =0; index < commandsArr_maxize; ++index)
@@ -3275,14 +3995,73 @@ private:
             }
         }
 
+        bool isCombinationOpCode(uint8_t opCode)
+        {
+            for (int index =0; index < OCCT_size; ++index)
+            {
+                if (opCodeCombination_table[index] == 0) {continue;}
+                if (opCode == opCodeCombination_table[index]) {return true; }
+            }
+            return false;
+        }
+        
+        bool postProcessing_afterRamRW()
+        {
+            bool isDead = ramP->get_deadState();
+            bool isUA = ramP->get_UAstate(*PID);
+            if (isUA)
+            {
+                // Unauthorized Access
+                regs[8].stbit(30);
+            }
+            if (isDead)
+            {
+                // Memory Overflow
+                regs[8].stbit(31);
+            }
+            return isDead || isUA;
+        }
+
+
+
+    public:
+        commandAddressing(reg32* IPt, reg32* segsT, reg32* regsT, Ram* ramG, commandDecoder* cmDcdrG, uint16_t* PIDt, uint8_t* SDIt)
+         : IP(IPt), segs(segsT), regs(regsT), ramP(ramG), cmDcdr(cmDcdrG), PID(PIDt), SDI(SDIt) {}
+
+        void ___readRam(uint32_t addr, uint8_t* buffer)
+        {
+            *buffer = ramP->read(addr, *PID);
+        }
+
         void addressing()
         {
             std::unique_lock<std::mutex> ram_lock(ramP->raMutexC);
-            uint32_t OPcode_addr = CS->word() * ramSegPer_maxize + IP->word();
+            uint32_t OPcode_addr = CS->word() * ramSegPer_size + IP->word();
             uint8_t opc = ramP->read(OPcode_addr, *PID);
             if (postProcessing_afterRamRW()) {return; }
+            uint8_t commandLength;
 
-            uint8_t commandLength = opCode_decodeTable[opc];
+            if (isCombinationOpCode(opc))
+            {
+                *SDI = (ramP->read(OPcode_addr + 1, *PID) >> 5) & 0b0111;
+                if (postProcessing_afterRamRW()) {return; }
+                switch (opc)
+                {
+                    case 0xff:
+                    {
+                        commandLength = _FFopCodeCombination_decodeTable[*SDI];
+                        break;
+                    }
+
+                    case 0xfe:
+                    {
+                        commandLength = _FEopCodeCombination_decodeTable[*SDI];
+                        break;
+                    }
+                }
+            }
+            else {commandLength = opCode_decodeTable[opc]; }
+            
             for (uint8_t index =0; index < commandLength; ++index)
             {
                 uint8_t temp = ramP->read(OPcode_addr + index, *PID);
@@ -3290,9 +4069,9 @@ private:
 
                 commands[index] = temp; 
             }
+            ram_lock.unlock();
             mov_buffer();
             IP->word(IP->word() + commandLength);
-            ram_lock.unlock();
             cmDcdr->decode(commandsBuffer);
         }
     
@@ -3328,6 +4107,7 @@ private:
         IOPL    12-13   2       I/O Privilege Level;
         NT      14      1       Nested Task;
         RF      16      1       Resume Flag;
+    >>  SOF     29      1       Stack Overflow Flag;
     >>  UAF     30      1       Unauthorized Access Flag;
     >>  MOF     31      1       Memory Overflow Flag;
     */
@@ -3341,11 +4121,15 @@ private:
 
     reg32 IP;
     reg32 FP;// FLAGS stackHead Pointer
+
+    uint8_t SDI = 0;
     
-    commandProcesser* cmdPcsr = new commandProcesser(&FLAG, &AX, &DX, &timE, ramP);
-    commandDecoder* cmdDcdr = new commandDecoder(cmdPcsr, *regs, *segs, &timE, ramP, &PID, 
+    commandProcesser* cmdPcsr = new commandProcesser(&FLAG, &AX, &DX, &timE, ramP, &SP, &BP, &FP, &PID, 
         &stackG_endIndex, &stackS_endIndex, &stackF_endIndex, &stackG_headIndex, &stackS_headIndex, &stackF_headIndex);
-    commandAddressing* cmdAdr = new commandAddressing(&IP, *segs, *regs, ramP, cmdDcdr, &PID);
+    IOmanager* IOM = new IOmanager();
+    commandDecoder* cmdDcdr = new commandDecoder(cmdPcsr, *regs, *segs, &timE, ramP, &PID, &SDI, IOM, 
+        &stackG_endIndex, &stackS_endIndex, &stackF_endIndex, &stackG_headIndex, &stackS_headIndex, &stackF_headIndex);
+    commandAddressing* cmdAdr = new commandAddressing(&IP, *segs, *regs, ramP, cmdDcdr, &PID, &SDI);
     
     std::map<uint16_t, devIO*> devsRegistry;
 
@@ -3430,7 +4214,7 @@ public:
     {
         std::lock_guard<std::mutex> centerLock(centerMutexC);
         if (!runningState) {return -1; }
-        if (FLAG.ckbit(1) || FLAG.ckbit(31) || FLAG.ckbit(30)) 
+        if (FLAG.ckbit(1) || FLAG.ckbit(31) || FLAG.ckbit(30) || FLAG.ckbit(29)) 
         {stop(); return -1; }
 
         cmdAdr->addressing();
@@ -3451,8 +4235,8 @@ private:
     rootOP* rootGOP;
 
 public:
-    Center2OPtransferDev(uint32_t ID, Hasher* hashG, rootOP* rootG)
-     : devIO(hashG->get_randNumHR2(ID), UKED_Center2OPtransferDev), rootGOP(rootG) {}
+    Center2OPtransferDev(uint32_t ID, rootOP* rootG)
+     : devIO(get_randNumHR2(ID), UKED_Center2OPtransferDev), rootGOP(rootG) {}
 
 };
 
@@ -3462,8 +4246,8 @@ private:
     Center32x* CenterOUTP;
 
 public:
-    Center2centerTransferDev(uint32_t ID, Hasher* hashG, Center32x* CenterOUT)
-     : devIO(hashG->get_randNumHR2(ID), UKED_Center2centerTransferDev), CenterOUTP(CenterOUT) {}
+    Center2centerTransferDev(uint32_t ID, Center32x* CenterOUT)
+     : devIO(get_randNumHR2(ID), UKED_Center2centerTransferDev), CenterOUTP(CenterOUT) {}
 
 };
 
@@ -3702,15 +4486,68 @@ bool initG()
             opCode_decodeTable[0x46] = 1;
             opCode_decodeTable[0x47] = 1;
         }
+        {// DEC
+            opCode_decodeTable[0x48] = 1;
+            opCode_decodeTable[0x49] = 1;
+            opCode_decodeTable[0x4A] = 1;
+            opCode_decodeTable[0x4B] = 1;
+            opCode_decodeTable[0x4C] = 1;
+            opCode_decodeTable[0x4D] = 1;
+            opCode_decodeTable[0x4E] = 1;
+            opCode_decodeTable[0x4F] = 1;
+        }
+        {// PUSH
+            opCode_decodeTable[0x50] = 1;
+            opCode_decodeTable[0x51] = 1;
+            opCode_decodeTable[0x52] = 1;
+            opCode_decodeTable[0x53] = 1;
+            opCode_decodeTable[0x54] = 1;
+            opCode_decodeTable[0x55] = 1;
+            opCode_decodeTable[0x56] = 1;
+            opCode_decodeTable[0x57] = 1;
+        }
+        {// POP
+            opCode_decodeTable[0x58] = 1;
+            opCode_decodeTable[0x59] = 1;
+            opCode_decodeTable[0x5A] = 1;
+            opCode_decodeTable[0x5B] = 1;
+            opCode_decodeTable[0x5C] = 1;
+            opCode_decodeTable[0x5D] = 1;
+            opCode_decodeTable[0x5E] = 1;
+            opCode_decodeTable[0x5F] = 1;
+        }
 
     }
     
+    // init the CombinationOpCodes-Decode-Tables
+    if (_FFopCodeCombination_decodeTable != nullptr)
+    {
+        memset(_FFopCodeCombination_decodeTable, 0, opCombination_maxize);
+        // SDI -> Index for Secendary Decoding, bits 3;
+        _FFopCodeCombination_decodeTable[0] = 4; // INC r/m32/16, [inc, SDI(3)|modR/M(1)|mod32/16(1)|reg(3), s32(wasted in R-mod), imm8(wasted in R-mod)]
+    }
+    if (_FEopCodeCombination_decodeTable != nullptr)
+    {
+        memset(_FEopCodeCombination_decodeTable, 0, opCombination_maxize);
+        // SDI -> Index for Secendary Decoding, bits 3;
+        _FEopCodeCombination_decodeTable[0] = 6; // INC m32/16, [inc, SDI(3)|mod32/16(1)|s32(4), addrLL, addrLH, addrHL, addrHH]
+    }
+
     // init the Hasher
     ashor = new Hasher();
+    //create_randNumTableHR2();
 
     // print info
     std::cout << "Version " << version << ", initialization complete, girls praying..." << std::endl;
     return true;
+}
+
+void end()
+{
+    delete ashor;
+    delete[] opCode_decodeTable;
+    delete[] _FFopCodeCombination_decodeTable;
+    delete[] _FEopCodeCombination_decodeTable;
 }
 
 void test() // just test for running
@@ -3738,7 +4575,7 @@ void test() // just test for running
     }
     ram2->write(0x00, 0x1d, rootPID);
     ram2->write32(0x01, 0xffffffff, rootPID);
-    if (ram1->get_deadState() || ram2->get_deadState()) {printf("Memory Overflow\n"); return; }
+    if (ram1->get_deadState() || ram2->get_deadState() || ram3->get_deadState()) {printf("Memory Overflow\n"); return; }
     center1.start();
     center2.start(); center3.start(); center4.start();
     std::thread debugPrintThread(&debugCMD::loop, &debuger);
@@ -3768,6 +4605,7 @@ int main()
     test();
     //*/
     system("pause");
+    end();
     return 0;
 }
 

@@ -46,11 +46,11 @@ SetConsoleMode(hOut, dwMode);
 */
 
 
-const std::string version = "0.1.8T";
+const std::string version = "0.1.9R-1";
 const int centers_maxize = 4;
 const int regs_maxize = 9;
 const int segs_maxize = 8;
-const int commandsArr_maxize = 10;
+const int commandsArr_maxize = 0x10;
 const uint8_t info2devIObuffer_maxize = 16;
 const uint8_t regsPer_Gcenter_maxize = 0xff;
 const uint8_t regsPer_Gcenter_minSize = 0x0f;
@@ -701,6 +701,14 @@ public:
             example ^   without error message;;
          */}
 
+    ~Center16g()
+    {
+        delete[] reg16sP;
+        delete[] reg32sP;
+        delete[] regF32sP;
+        delete[] coresP;
+    }
+
 };
 
 
@@ -857,6 +865,7 @@ public:
     uint8_t* buffer;
 
 
+    virtual void loop() = 0;
 
     devIO(uint32_t ID, uint32_t UKED)
      : UEID(ID), UKUEUD(UKED), buffer(new uint8_t[info2devIObuffer_maxize]()), infoBuffer(new uint8_t[info2devIObuffer_maxize]()),
@@ -1011,10 +1020,10 @@ public:
 class GraphicDev : public devIO
 {
 private:
+    Screen* screenP;
     uint32_t gram_size;
     uint8_t graphCenters_count;
-    uint8_t* GramD;
-    Screen* screenP;
+    uint8_t* GramD; // for Addressing of graphCenters and save datas
     Center16g* gCentersP;
 
 public:
@@ -1045,13 +1054,12 @@ public:
 
     ~GraphicDev()
     {
-        delete screenP;
         delete[] GramD;
         for (uint8_t index =0; index < graphCenters_count; ++index)
         {
             gCentersP[index].~Center16g();
         }
-        delete[] gCentersP;
+        operator delete (gCentersP);
     }
 
 };
@@ -2259,7 +2267,7 @@ private:
                     uint8_t srcRegIndex = (commands[1] >> 3) & 0b0111;
                     uint8_t baseRegIndex = commands[1] & 0b111;
                     uint8_t segIndex = commands[2] & 0b111;
-                    bool isHalf = (commands[1] & 0b1000) != 0;
+                    bool isHalf = (commands[1] & 0x40) != 0;
 
                     uint32_t memAddr = regs[baseRegIndex].word() + segs[segIndex].word() * ramSegPer_size;
                     reg32 memVal = 0;

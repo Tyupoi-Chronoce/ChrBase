@@ -25,7 +25,7 @@ namespace CK
     {
         uint32_t data = 0xcccccccc; // truncate as needed
         uint8_t resFlag = 0x00; // [safeData(4)|iSafe(1)|UAF(1)|MOF(1)|isValid(1)]
-        /* safeData is reserved for future interactions with Center16g */
+        /* safeData is reserved for future interactions with graphCenter */
     } resData;
 
 
@@ -33,7 +33,6 @@ namespace CK
     {
     private:
         uint32_t ramSegs_maxcount;
-        uint32_t ram_size;
         uint32_t stackGeneral_endIndex, stackSegReg_endIndex, stackFLAGS_endIndex;
         const static uint32_t ramSegs_size = ramSegPer_size;
         const static uint32_t PID_maxize = 0xffff;
@@ -42,6 +41,7 @@ namespace CK
         mutable uint32_t write_times = 0;
         mutable bool deadState_temp = false;
         mutable uint8_t* ramD;
+        uint32_t ram_size;
         
         // 0x00 is root PID, same means it s locked for other Processes tha cant visit;
         // 0x01 is const PID, same means every Process can visit tha ram segmentation locked by it but read only except root PID;
@@ -59,7 +59,8 @@ namespace CK
             stackSegReg_endIndex(stackGeneral_endIndex - stack_maxize),
             stackFLAGS_endIndex(stackSegReg_endIndex - stack_maxize) 
         {
-            memset(ramSgmtation_LocktPID, publicPID, ramSegs_maxcount);
+            //memset(ramSgmtation_LocktPID, publicPID, ramSegs_maxcount);
+            std::fill(ramSgmtation_LocktPID, ramSgmtation_LocktPID + ramSegs_maxcount + 1, publicPID);
         }
 
         bool PIDcanRead(uint32_t index, uint16_t PID) const
@@ -91,16 +92,16 @@ namespace CK
         resData read(uint32_t index, uint16_t PID=publicPID) const
         {
             resData res;
+            if (index > ram_size) 
+            {
+                res.resFlag |=0b0010; // set MOF;
+                return res;
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanRead(index, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100; // set UAF
-                return res;
-            }
-            if (index > ram_size) 
-            {
-                res.resFlag |=0b0010; // set MOF;
                 return res;
             }
             read_times++;
@@ -111,16 +112,16 @@ namespace CK
         resData write(uint32_t index, uint8_t val, uint16_t PID=publicPID)
         {
             resData res;
+            if (index > ram_size) 
+            {
+                res.resFlag |=0b0010; // set MOF;
+                return res;
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanWrite(index, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100; // set UAF
-                return res;
-            }
-            if (index > ram_size) 
-            {
-                res.resFlag |=0b0010; // set MOF;
                 return res;
             }
             write_times++;
@@ -131,16 +132,16 @@ namespace CK
         resData read16(uint32_t index, uint16_t PID=publicPID) const
         {
             resData res;
+            if (index +1 > ram_size)
+            {
+                res.resFlag |=0b0010;
+                return res;
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanRead(index, PID) && PIDcanRead(index +1, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100;
-                return res;
-            }
-            if (index +1 > ram_size)
-            {
-                res.resFlag |=0b0010;
                 return res;
             }
             read_times++;
@@ -151,16 +152,16 @@ namespace CK
         resData read32(uint32_t index, uint16_t PID=publicPID) const
         {
             resData res;
+            if (index +3 > ram_size)
+            {
+                res.resFlag |=0b0010;
+                return res;
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanRead(index, PID) && PIDcanRead(index +3, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100;
-                return res;
-            }
-            if (index +3 > ram_size)
-            {
-                res.resFlag |=0b0010;
                 return res;
             }
             read_times++;
@@ -171,16 +172,16 @@ namespace CK
         resData write16(uint32_t index, uint16_t val, uint16_t PID=publicPID)
         {
             resData res;
+            if (index +1 > ram_size)
+            {
+                res.resFlag |=0b0010;
+                return res; 
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanWrite(index, PID) && PIDcanWrite(index +1, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100;
-                return res; 
-            }
-            if (index +1 > ram_size)
-            {
-                res.resFlag |=0b0010;
                 return res; 
             }
             write_times++;
@@ -192,16 +193,16 @@ namespace CK
         resData write32(uint32_t index, uint32_t val, uint16_t PID=publicPID)
         {
             resData res;
+            if (index +3 > ram_size)
+            {
+                res.resFlag |=0b0010;
+                return res;
+            }
             bool canVisit = true; // root PID can pass
             if (!(PID == rootPID)) {canVisit = PIDcanWrite(index, PID) && PIDcanWrite(index +3, PID); }
             if (!canVisit) 
             {
                 res.resFlag |= 0b0100;
-                return res;
-            }
-            if (index +3 > ram_size)
-            {
-                res.resFlag |=0b0010;
                 return res;
             }
             write_times++;
@@ -218,7 +219,11 @@ namespace CK
         uint32_t get_readTimes() const {return read_times; }
         uint32_t get_writeTimes() const {return write_times; }
 
-        void setSegPID(uint32_t index_ramSeg, uint16_t PIDt) {ramSgmtation_LocktPID[index_ramSeg] = PIDt; }
+        void setSegPID(uint32_t index_ramSeg, uint16_t PIDt) 
+        {
+            if (index_ramSeg >= ram_size) {return; }
+            ramSgmtation_LocktPID[index_ramSeg] = PIDt; 
+        }
 
 
         ~Ram()

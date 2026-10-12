@@ -1,0 +1,12 @@
+*.exe
+.workbuddy/*
+
+# ---- 不可再分发 / 许可不明的第三方资源：仅本地使用，禁止入库 ----
+#
+# audio_sources/pc98_ym2608.sf2
+#   内嵌 ICOP = "(C) 2009 The Eighth Bit, Rec Games, All Rights Reserved."
+#   真名 "The Ultimate Megadrive Soundfont"（其实是 Mega Drive / YM2612 音源，不是 YM2608）
+# fonts/lolita.ttf
+#   无 license 字段，来源与授权不明
+audio_sources/*.sf2
+fonts/lolita.ttf
